@@ -6,14 +6,24 @@ from graph.graph_state import AgentState
 
 
 
-def create_search_prompt(user_query: str) -> str:
-    prompt = f"""
-    "{user_query}" 
-    (site:bestbuy.com)
-    (inurl:product OR inurl:dp OR inurl:ip OR inurl:item)
-    ("current price" OR "price" OR "buy now")
-    in stock
-    -("discontinued" OR "out of stock" OR "not available")
+def create_search_prompt(user_query: str, domain:str) -> str:
+    # prompt = f"""
+    # "{user_query}" 
+    # (site:bestbuy.com)
+    # (inurl:product OR inurl:dp OR inurl:ip OR inurl:item)
+    # ("current price" OR "price" OR "buy now")
+    # in stock
+    # -("discontinued" OR "out of stock" OR "not available")
+    # """
+    
+    prompt =  f"""
+      Search for the product "{user_query}" exclusively on the website "{domain}". Provide a comprehensive summary that includes the following details sourced only from "{domain}":
+
+  
+
+
+    Ensure that all information is accurate and solely derived from "{domain}". Do not include data or references from any other websites or sources.
+
     """
     return prompt
 
@@ -22,7 +32,7 @@ def bestbuy_node(state: AgentState):
     # query = state["tasks"][0]
     print(f"bestbuy node")
     try:
-        search_prompt = create_search_prompt("iphone 15")
+        search_prompt = create_search_prompt(state["query"],"bestbuy.com")
         print(f"serch prmopot: {search_prompt}")
         # Add image search capability
         search_results =  tavily.search(
@@ -43,7 +53,7 @@ def bestbuy_node(state: AgentState):
             # Try to get corresponding image if available
             image_url = images[idx] if idx < len(images) else "https://via.placeholder.com/300"
             
-            processed_results.append({
+            processed_results.append({ 
                 "title": get_english_product_name(result["title"]),
                 "url": result["url"],
                 "content": result["content"],
@@ -51,21 +61,22 @@ def bestbuy_node(state: AgentState):
             })
             
        # logger.info("Processed results with images:", processed_results)
-        # state["bestbuy_results"] = processed_results
-           
+        #state["bestbuy_results"] = processed_results
+       # state["aggregator"] = [{"bestbuy_results": processed_results}]
     except IndexError:
         # Handle case when idx is out of range for images list
-        logger.error("No corresponding image found for a search result.")
-        state["bestbuy_results"] = []
+        logger.error("error No corresponding image found for a search result.")
+        #state["bestbuy_results"] = []
     except Exception as e:
         #print(f"search error {e}")
         logger.error(f"Error {e}")
-        state["bestbuy_results"] = []
+        #state["bestbuy_results"] = []
     # return {
     #     **state,
     #     "bestbuy_results": processed_results,
     #     "next_steps": ["check_coordinator"]
     # }
-    return {"aggregate": [processed_results]}
+    return {"aggregator": [{"bestbuy_results": processed_results}]}
+    #return state
 
 

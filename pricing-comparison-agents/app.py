@@ -6,111 +6,96 @@ st.set_page_config(layout="wide")
 
 st.markdown("""
     <style>
-    .search-container {
-        padding: 1rem;
-        text-align: center;
-    }
-    .product-grid {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 1.25rem;
-        padding: 1rem;
-        align-items: stretch;
-    }
-
     .product-card {
-        flex: 0 1 300px;
         background: white;
-        border: 1px solid #e0e0e0;
+        border: 1px solid #e5e7eb;
         border-radius: 0.5rem;
-        padding: 1rem;
-        box-shadow: rgba(0, 0, 0, 0.1) 0px 4px 12px;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
+        padding: 0.75rem;
+        margin: 0.5rem;
+        transition: all 0.2s ease;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
-
-    .retailer-section {
-        margin-top: auto;
-        padding-top: 0.75rem;
-        border-top: 1px solid #e5e7eb;
-    }
-    
-    
-    # .retailer-row {
-    #     background: #f8f9fa;
-    #     padding: 0.75rem;
-    #     margin: 0.5rem 0;
-    #     border-radius: 0.5rem;
-    # }
-    
-
-    # .product-card {
-    #     background: white;
-    #     border: 1px solid #e5e7eb;
-    #     border-radius: 0.5rem;
-    #     padding: 1rem;
-    #     box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    #     transition: all 0.2s ease;
-    #     height: 100%;
-    #     display: flex;
-    #     flex-direction: column;
-    # }
 
     .product-card:hover {
+        transform: translateY(-2px);
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        transform: translateY(-1px);
     }
 
-    .product-image {
-        width: 100%;
-        height: 200px;
-        object-fit: contain;
-        margin-bottom: 0.75rem;
+    .product-grid {
+        display: grid;
+        gap: 1rem;
+        padding: 0.5rem;
     }
-
-    .product-title {
-        font-size: 1rem;
-        line-height: 1.4;
-        font-weight: 500;
-        margin-bottom: 0.75rem;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-    }
-
-    # .retailer-section {
-    #     margin-top: auto;
-    #     padding: 0.75rem 0 0;
-    #     border-top: 1px solid #e5e7eb;
-    # }
 
     .retailer-row {
-            display: flex;
-            align-items: center;
-            padding: 0.5rem;
-            margin: 0.25rem 0;
-            background: #f9fafb;
-            border-radius: 0.25rem;
+        display: flex;
+        align-items: center;
+        padding: 0.5rem;
+        margin: 0.25rem 0;
+        border-radius: 0.375rem;
+        background: #f8fafc;
+        transition: background-color 0.15s ease;
+    }
+
+    .retailer-row:hover {
+        background: #f1f5f9;
+        cursor: pointer;
     }
 
     .retailer-name {
         flex: 2;
+        font-size: 0.875rem;
+        color: #374151;
     }
 
     .retailer-price {
         flex: 1;
-        font-weight: 500;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: #1f2937;
+        text-align: right;
+        padding-right: 0.5rem;
     }
 
-    .retailer-availability {
-        flex: 0 0 auto;
-        width: 24px;
-        text-align: center;
+    .rating {
+        color: #fbbf24;
+        font-size: 0.75rem;
+        margin: 0.25rem 0;
     }
-    div[data-testid="stVerticalBlock"] > div:has(div.stButton) {
+
+    .product-title {
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: #111827;
+        margin: 0.5rem 0;
+        line-height: 1.25;
+    }
+
+    .image-container {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.5rem;
+        background: #f9fafb;
+        border-radius: 0.375rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .availability-icon {
+        width: 20px;
+        height: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .search-header {
         text-align: center;
+        padding: 2rem 0;
+        background: linear-gradient(to right, #4f46e5, #3b82f6);
+        color: white;
+        margin-bottom: 2rem;
+        border-radius: 0.5rem;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -119,44 +104,79 @@ if "show_results" not in st.session_state:
     st.session_state["show_results"] = False
 
 if not st.session_state["show_results"]:
-    st.title("Search Smarter, Shop Better")
+    st.markdown("""
+        <div class="search-header">
+            <h1>Search Smarter, Shop Better</h1>
+        </div>
+    """, unsafe_allow_html=True)
+    
     user_query = st.text_input("", placeholder="Search for any product...", key="search_input")
     
     if st.button("Compare Prices", type="primary", use_container_width=False):
         if user_query:
             with st.spinner("Searching across retailers..."):
                 graph_results = run_graph(user_query)
-                st.session_state.comparison_results = graph_results.get("comparison_results", [])
+                st.session_state.comparison_results = graph_results.get("aggregator", [])[6]["top_result"]
                 st.session_state.show_results = True
                 st.rerun()
         else:
             st.warning("Please enter a product name.")
 
 else:
-    if st.button("← New Search"):
+    if st.button("← New Search", type="secondary"):
         st.session_state.show_results = False
         st.rerun()
     
     if "comparison_results" in st.session_state:
         comparison_data = st.session_state.comparison_results
         
-       # In your layout code
-        num_columns = 3
-        for i in range(0, len(comparison_data.get("products", [])), num_columns):
-            cols = st.columns(num_columns)
+        for i in range(0, len(comparison_data.get("products", [])), 2):
+            cols = st.columns(2)
             for j, col in enumerate(cols):
                 if i + j < len(comparison_data.get("products", [])):
                     product = comparison_data["products"][i + j]
+                    
+                    # Safely get rating, default to 5 if not found
+                    rating = 5
+                    if "rating" in product and product["rating"]:
+                        try:
+                            rating = int(float(product["rating"]))
+                        except:
+                            rating = 5
+
                     with col:
-                        with st.container():
-                            st.image(product["image"], width=200)
-                            st.markdown(f"**{product['title'][:60]}...**" if len(product['title']) > 60 else f"**{product['title']}**")
-                            st.write("⭐" * int(product["rating"]))
-                            for retailer in product["retailers"]:
-                                st.markdown(f"""
-                                    <div class='retailer-row'>
-                                        <span style='flex:2'>{retailer['name']}</span>
-                                        <span style='flex:1'>${retailer['price']}</span>
-                                        <span>{'✅' if retailer['availability'] else '❌'}</span>
+                        st.markdown(f'''
+                            <div style="display: flex; background: white; padding: 1rem; 
+                                    border-radius: 0.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+                                    margin: 0.5rem 0; gap: 1rem;">
+                                <div style="flex: 1;">
+                                    <img src="{product['image']}" style="width: 100%; max-height: 150px; 
+                                        object-fit: contain; border-radius: 0.375rem;">
+                                    <div style="color: #fbbf24; font-size: 0.75rem; margin-top: 0.5rem;">
+                                        {"⭐" * rating}
                                     </div>
-                                """, unsafe_allow_html=True)
+                                </div>
+                                <div style="flex: 1.5;">
+                                    <div style="font-weight: 500; margin-bottom: 0.75rem; 
+                                            font-size: 0.875rem; color: #1a202c;">
+                                        {product['title'][:50]}...
+                                    </div>
+                                    <div>
+                                        {"".join([f"""
+                                            <div style="display: flex; align-items: center; padding: 0.5rem;
+                                                    margin: 0.25rem 0; background: #f8fafc; 
+                                                    border-radius: 0.375rem; font-size: 0.75rem;">
+                                                <span style="flex: 2; color: #4a5568;">{r['name']}</span>
+                                                <span style="flex: 1; font-weight: 600; color: #1a202c; 
+                                                    text-align: right; padding-right: 0.5rem;">
+                                                    ${r['price']}
+                                                </span>
+                                                <span style="width: 20px; text-align: center;">
+                                                    {'✅' if r['availability'] else '❌'}
+                                                </span>
+                                            </div>
+                                        """ for r in product["retailers"]])}
+                                    </div>
+                                </div>
+                            </div>
+                        ''', unsafe_allow_html=True)

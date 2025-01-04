@@ -6,14 +6,21 @@ from graph.graph_state import AgentState
 
 
 
-def create_search_prompt(user_query: str) -> str:
-    prompt = f"""
-    "{user_query}" 
-    (site:WALMART.com)
-    (inurl:product OR inurl:dp OR inurl:ip OR inurl:item)
-    ("current price" OR "price" OR "buy now")
-    in stock
-    -("discontinued" OR "out of stock" OR "not available")
+def create_search_prompt(user_query: str,domain:str) -> str:
+    # prompt = f"""
+    # "{user_query}" 
+    # (site:WALMART.com)
+    # (inurl:product OR inurl:dp OR inurl:ip OR inurl:item)
+    # ("current price" OR "price" OR "buy now")
+    # in stock
+    # -("discontinued" OR "out of stock" OR "not available")
+    # """
+    prompt =  f"""
+      Search for the product "{user_query}" exclusively on the website "{domain}". Provide a comprehensive summary that includes the following details sourced only from "{domain}":
+
+    
+    Ensure that all information is accurate and solely derived from "{domain}". Do not include data or references from any other websites or sources.
+
     """
     return prompt
 
@@ -21,7 +28,7 @@ def walmart_node(state: AgentState):
     print(f"walmart node")
     # query = state["tasks"][0]
     try:
-        search_prompt = create_search_prompt("iphone 15")
+        search_prompt = create_search_prompt(state["query"], "walmart.com")
         print(f"serch prmopot: {search_prompt}")
         # Add image search capability
         search_results =  tavily.search(
@@ -50,8 +57,8 @@ def walmart_node(state: AgentState):
             })
             
        # logger.info("Processed results with images:", processed_results)
-        # state["walmart_results"] = processed_results
-           
+        #state["walmart_results"] = processed_results
+        #state["aggregator"] = [{"walmart_results": processed_results}]
     except IndexError:
         # Handle case when idx is out of range for images list
         logger.error("No corresponding image found for a search result.")
@@ -65,5 +72,5 @@ def walmart_node(state: AgentState):
     #     "walmart_results": processed_results,
     #     "next_steps": ["check_coordinator"]
     # }
-    return {"aggregate": [processed_results]}
-
+    return {"aggregator": [{"walmart_results": processed_results}]}
+    #return state

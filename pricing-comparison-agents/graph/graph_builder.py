@@ -9,16 +9,16 @@ from IPython.display import Image, display
 from typing import Annotated, List, TypedDict
 
 
-def route_to_retailers(state: AgentState) -> List[str]:
-        # Only route to retailers that haven't processed yet
-        next_steps = []
-        if not state["amazon_results"]:
-            next_steps.append("amazon")
-        if not state["bestbuy_results"]:
-            next_steps.append("bestbuy")
-        if not state["walmart_results"]:
-            next_steps.append("walmart")
-        return next_steps
+# def route_to_retailers(state: AgentState) -> List[str]:
+#         # Only route to retailers that haven't processed yet
+#         next_steps = []
+#         if not state["amazon_results"]:
+#             next_steps.append("amazon")
+#         if not state["bestbuy_results"]:
+#             next_steps.append("bestbuy")
+#         if not state["walmart_results"]:
+#             next_steps.append("walmart")
+#         return next_steps
     
     
     
@@ -94,7 +94,9 @@ def run_graph(user_input: str) -> AgentState:
         # tasks=[user_input],     # Initialize 'tasks' as a list with the user input
         # summary=[],
         # next_steps=["start"]
-        aggregator=[]
+        # aggregator=[{"user input": user_input}],
+        aggregator=[{"user input": user_input}],
+        query=user_input
     )
     # ... your graph invocation logic ...
     final_state = compiled_graph.invoke(initial_state)

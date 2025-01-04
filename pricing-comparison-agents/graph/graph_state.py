@@ -1,5 +1,5 @@
 from typing import TypedDict
-from typing import Annotated, List, TypedDict
+from typing import Annotated, List, TypedDict, Dict
 import operator
 
 class Retailer(TypedDict):
@@ -29,7 +29,9 @@ class AgentState(TypedDict):
     # tasks:  Annotated[list, operator.add]  # Changed from 'task: str' to 'tasks: List[str]'
     # summary :  Annotated[list, operator.add]
     # next_steps=[]
-    aggregator: Annotated[list, operator.add]
+    # aggregator: Annotated[list[tuple[str, list]], operator.add]
+    aggregator: Annotated[List[Dict[str, List]], operator.add]
+    query: str
     
     
     

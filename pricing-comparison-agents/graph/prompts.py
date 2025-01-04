@@ -53,6 +53,7 @@ def create_compare_prompt(search_results:list[str]) -> str:
                 "title": "Full Product Name",
                 "image": "Use actual product image URL from search_results, NO placeholder",
                 "rating": 5,
+                "url" :"https://amamzon.com",
                 "retailers": [
                     {{
                         "name": "Walmart",
