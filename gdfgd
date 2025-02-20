@@ -1,0 +1,99 @@
+from langchain.embeddings import HuggingFaceEmbeddings
+from elasticsearch import Elasticsearch
+import numpy as np
+import json
+
+# Initialize embeddings
+model_name = "sentence-transformers/all-MiniLM-L6-v2"
+embeddings = HuggingFaceEmbeddings(
+    model_name=model_name,
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True}
+)
+
+# Initialize Elasticsearch
+es = Elasticsearch(["http://localhost:9200"])
+index_name = "my_chunks_index"
+
+# Create index if not exists
+if not es.indices.exists(index=index_name):
+    es.indices.create(index=index_name, body={
+        "mappings": {
+            "properties": {
+                "content": {"type": "text"},
+                "semantic_content": {"type": "semantic_text", "inference_id": "elser_inference"},
+                "dense_embedding": {"type": "dense_vector", "dims": 384, "index": True, "similarity": "cosine"},
+                "metadata": {"type": "object"}
+            }
+        }
+    })
+
+# Example chunks and Docmeta (replace with your actual classes)
+class Docmeta:
+    def __init__(self, doc_id, page):
+        self.doc_id = doc_id
+        self.page = page
+
+class DocChunk:
+    def __init__(self, text, meta):
+        self.text = text
+        self.meta = meta
+
+chunks = [
+    DocChunk("This is the first chunk.", Docmeta("123", 1)),
+    DocChunk("Second chunk about AI.", Docmeta("123", 2))
+]
+
+# Function to make metadata serializable
+def make_serializable(obj):
+    if hasattr(obj, '__dict__'):
+        return {k: make_serializable(v) for k, v in obj.__dict__.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [make_serializable(item) for item in obj]
+    elif isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    else:
+        return str(obj)  # Fallback for non-serializable types
+
+# Index chunks individually
+print("Starting indexing loop...")
+for i, chunk in enumerate(chunks):
+    print(f"Processing chunk {i}: {chunk.text[:20]}...")
+    
+    # Generate and serialize embedding
+    embedding = embeddings.embed_documents([chunk.text])[0]
+    if isinstance(embedding, np.ndarray):
+        embedding = embedding.tolist()
+    print(f"Embedding type: {type(embedding)}, First 5 values: {embedding[:5]}")
+    
+    # Convert metadata to a serializable dict
+    metadata = make_serializable(chunk.meta)
+    print(f"Serialized metadata: {metadata}")
+    
+    # Construct document
+    doc = {
+        "content": chunk.text,
+        "semantic_content": chunk.text,
+        "dense_embedding": embedding,
+        "metadata": metadata
+    }
+    
+    # Test JSON serialization
+    try:
+        json.dumps(doc)
+        print("Doc serialized successfully")
+    except TypeError as e:
+        print(f"Serialization failed: {str(e)}")
+        print(f"Problematic doc: {doc}")
+        raise
+    
+    # Index with error handling
+    try:
+        es.index(index=index_name, id=i, body=doc)
+        print(f"Indexed chunk {i}")
+    except Exception as e:
+        print(f"Error indexing chunk {i}: {str(e)}")
+        print(f"Doc causing error: {doc}")
+        raise
+
+print("Chunks indexed successfully!")
