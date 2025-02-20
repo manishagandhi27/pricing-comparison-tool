@@ -1,0 +1,35 @@
+from elasticsearch import Elasticsearch
+
+# Initialize Elasticsearch
+es = Elasticsearch(["http://localhost:9200"])
+index_name = "my_chunks_index"
+
+# Define a test query
+query = "AI and machine learning"
+print(f"Query: {query}")
+
+# Text expansion query
+text_expansion_query = {
+    "query": {
+        "text_expansion": {
+            "semantic_content": {
+                "model_id": "elser_inference",
+                "model_text": query,
+                "boost": 1.0  # Optional: Adjusts weighting
+            }
+        }
+    }
+}
+
+# Execute the search
+try:
+    response = es.search(index=index_name, body=text_expansion_query)
+    print("\nText Expansion Results:")
+    for hit in response["hits"]["hits"]:
+        score = hit["_score"]
+        content = hit["_source"]["content"]
+        metadata = hit["_source"].get("metadata", {})
+        print(f"Score: {score:.4f}, Content: {content}, Metadata: {metadata}")
+    print(f"Total hits: {response['hits']['total']['value']}")
+except Exception as e:
+    print(f"Error: {str(e)}")
