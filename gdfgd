@@ -45,16 +45,34 @@ chunks = [
 ]
 
 # Function to make metadata serializable
+# Simplified serialization function
 def make_serializable(obj):
+    # Handle Docmeta or other objects with __dict__
     if hasattr(obj, '__dict__'):
-        return {k: make_serializable(v) for k, v in obj.__dict__.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [make_serializable(item) for item in obj]
+        result = {}
+        for key, value in obj.__dict__.items():
+            # Avoid self-references
+            if value is obj:
+                result[key] = "self_reference"
+            # Handle basic types directly
+            elif isinstance(value, (str, int, float, bool, type(None))):
+                result[key] = value
+            # Convert lists/tuples iteratively
+            elif isinstance(value, (list, tuple)):
+                result[key] = [make_serializable(item) for item in value]
+            # Convert nested dicts iteratively
+            elif isinstance(value, dict):
+                result[key] = {k: make_serializable(v) for k, v in value.items()}
+            # Fallback for other objects
+            else:
+                result[key] = str(value)
+        return result
+    # Handle basic types
     elif isinstance(obj, (str, int, float, bool, type(None))):
         return obj
+    # Fallback
     else:
-        return str(obj)  # Fallback for non-serializable types
-
+        return str(obj)
 # Index chunks individually
 print("Starting indexing loop...")
 for i, chunk in enumerate(chunks):
