@@ -1,0 +1,92 @@
+from langchain.embeddings import HuggingFaceEmbeddings
+from elasticsearch import Elasticsearch
+import numpy as np
+import json
+
+# Initialize embeddings
+model_name = "sentence-transformers/all-MiniLM-L6-v2"
+embeddings = HuggingFaceEmbeddings(
+    model_name=model_name,
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True}
+)
+
+# Initialize Elasticsearch
+es = Elasticsearch(["http://localhost:9200"])
+index_name = "my_chunks_index"
+
+# Create index if not exists (ensure mapping is correct)
+if not es.indices.exists(index=index_name):
+    es.indices.create(index=index_name, body={
+        "mappings": {
+            "properties": {
+                "content": {"type": "text"},
+                "semantic_content": {"type": "semantic_text", "inference_id": "elser_inference"},
+                "dense_embedding": {"type": "dense_vector", "dims": 384, "index": True, "similarity": "cosine"},
+                "metadata": {"type": "object"}
+            }
+        }
+    })
+
+# Example chunks (replace with your actual chunks)
+class DocChunk:
+    def __init__(self, text, meta):
+        self.text = text
+        self.meta = meta
+
+chunks = [
+    DocChunk("This is the first chunk.", {"doc_id": "123", "page": 1}),
+    DocChunk("Second chunk about AI.", {"doc_id": "123", "page": 2})
+]
+
+# Index chunks individually
+print("Starting indexing loop...")
+for i, chunk in enumerate(chunks):
+    print(f"Processing chunk {i}: {chunk.text[:20]}...")
+    
+    # Generate embedding
+    embedding = embeddings.embed_documents([chunk.text])[0]
+    print(f"Raw embedding type: {type(embedding)}, Length: {len(embedding)}")
+    
+    # Convert to a flat list of floats
+    if isinstance(embedding, np.ndarray):
+        embedding = embedding.tolist()
+    elif not isinstance(embedding, list):
+        embedding = list(embedding)
+    
+    # Validate embedding format
+    if not all(isinstance(x, (int, float)) for x in embedding):
+        print(f"Invalid embedding values: {embedding[:5]}")
+        raise ValueError("Embedding contains non-numeric values!")
+    if len(embedding) != 384:  # Match dims in mapping
+        print(f"Embedding length mismatch: {len(embedding)} (expected 384)")
+        raise ValueError("Embedding length does not match expected dimensions!")
+    print(f"Serialized embedding type: {type(embedding)}, First 5 values: {embedding[:5]}")
+    
+    # Construct document (metadata commented out as per your test)
+    doc = {
+        "content": chunk.text,
+        "semantic_content": chunk.text,
+        "dense_embedding": embedding
+        # "metadata": chunk.meta  # Commented out
+    }
+    
+    # Test JSON serialization
+    try:
+        json.dumps(doc)
+        print("Doc serialized successfully")
+    except TypeError as e:
+        print(f"Serialization failed: {str(e)}")
+        print(f"Problematic doc: {doc}")
+        raise
+    
+    # Index with error handling
+    try:
+        es.index(index=index_name, id=i, body=doc)
+        print(f"Indexed chunk {i}")
+    except Exception as e:
+        print(f"Error indexing chunk {i}: {str(e)}")
+        print(f"Doc causing error: {doc}")
+        raise
+
+print("Chunks indexed successfully!")
