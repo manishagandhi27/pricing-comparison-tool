@@ -1,0 +1,84 @@
+from langchain.embeddings import HuggingFaceEmbeddings
+from elasticsearch import Elasticsearch
+import numpy as np
+
+# Initialize embeddings (same model as indexing)
+model_name = "sentence-transformers/all-MiniLM-L6-v2"
+embeddings = HuggingFaceEmbeddings(
+    model_name=model_name,
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True}
+)
+
+# Initialize Elasticsearch
+es = Elasticsearch(["http://localhost:9200"])
+index_name = "my_chunks_index"
+
+# Define a query
+query = "AI and machine learning"
+print(f"Query: {query}")
+
+# Generate dense embedding for k-NN
+query_embedding = embeddings.embed_query(query)
+if isinstance(query_embedding, np.ndarray):
+    query_embedding = query_embedding.tolist()
+print(f"Query embedding length: {len(query_embedding)}, First 5 values: {query_embedding[:5]}")
+
+# Construct hybrid search query
+hybrid_query = {
+    "query": {
+        "sub_searches": [
+            # Lexical search (BM25)
+            {
+                "query": {
+                    "match": {
+                        "content": {
+                            "query": query,
+                            "boost": 1.0  # Adjust weighting if needed
+                        }
+                    }
+                }
+            },
+            # Sparse vector search (ELSER)
+            {
+                "query": {
+                    "text_expansion": {
+                        "semantic_content": {
+                            "model_id": "elser_inference",
+                            "model_text": query,
+                            "boost": 1.0
+                        }
+                    }
+                }
+            }
+        ],
+        "rank": {
+            "rrf": {
+                "window_size": 50,  # Top results to consider
+                "rank_constant": 20  # Balances score impact
+            }
+        }
+    },
+    # Dense vector search (k-NN)
+    "knn": {
+        "field": "dense_embedding",
+        "query_vector": query_embedding,
+        "k": 10,  # Top k results
+        "num_candidates": 50,  # Candidates for HNSW search
+        "boost": 1.0
+    }
+}
+
+# Execute the search
+response = es.search(index=index_name, body=hybrid_query)
+
+# Process and display results
+print("\nSearch Results:")
+hits = response["hits"]["hits"]
+for hit in hits:
+    score = hit["_score"]
+    content = hit["_source"]["content"]
+    metadata = hit["_source"].get("metadata", {})
+    print(f"Score: {score:.4f}, Content: {content}, Metadata: {metadata}")
+
+print(f"Total hits: {response['hits']['total']['value']}")
