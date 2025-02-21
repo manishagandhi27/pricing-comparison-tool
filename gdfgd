@@ -1,35 +1,100 @@
-def preprocess_metadata(meta):
-    """Ensure all nested values are ES-friendly."""
-    if not isinstance(meta, dict):
-        return {"value": str(meta) if meta else ""}
-    result = {}
-    for key, value in meta.items():
-        if isinstance(value, dict):
-            result[key] = preprocess_metadata(value)
-        else:
-            # Convert problematic types to strings
-            result[key] = str(value) if value is not None else ""
-    return result
+from langchain.embeddings import HuggingFaceEmbeddings
+from elasticsearch import Elasticsearch
+import numpy as np
 
-# Save chunks with preprocessing
-for i, chunk in enumerate(chunks):
-    meta = preprocess_metadata(chunk.metadata)
-    print(f"Chunk {i} metadata: {meta}")
-    
-    doc = {
-        "content": chunk.page_content,
-        "dense_embedding": embeddings.embed_query(chunk.page_content).tolist(),
-        "metadata": meta,
-        "tags": ["AI", "tech"],
-        "file_description": "AI trends report",
-        "file_name": "unknown.pdf"
+# Initialize ES and embeddings (same as indexing)
+es = Elasticsearch(["http://localhost:9200"])
+index_name = "my_chunks_index"
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+def hybrid_search(query, top_k=5):
+    """
+    Perform hybrid search on ES with BM25, ELSER sparse, and dense k-NN.
+    Returns formatted results.
+    """
+    # Generate dense embedding for k-NN
+    query_embedding = embeddings.embed_query(query)
+    if isinstance(query_embedding, np.ndarray):
+        query_embedding = query_embedding.tolist()
+
+    # Hybrid search query
+    hybrid_query = {
+        "query": {
+            "bool": {
+                "should": [
+                    {
+                        "match": {
+                            "content": {
+                                "query": query,
+                                "boost": 1.0  # Adjust weighting if needed
+                            }
+                        }
+                    },  # BM25
+                    {
+                        "text_expansion": {
+                            "semantic_content": {
+                                "model_id": "elser_inference",
+                                "model_text": query,
+                                "boost": 1.0
+                            }
+                        }
+                    }  # ELSER sparse
+                ],
+                "minimum_should_match": 1  # At least one clause must match
+            }
+        },
+        "knn": {
+            "field": "dense_embedding",
+            "query_vector": query_embedding,
+            "k": top_k,
+            "num_candidates": 50,  # Candidates for HNSW search
+            "boost": 1.0
+        },  # Dense k-NN
+        "rank": {
+            "rrf": {
+                "window_size": 50,  # Top N per method
+                "rank_constant": 20  # Balances score decay
+            }
+        }  # Reciprocal Rank Fusion
     }
-    print(f"Doc to index: {doc}")
-    
+
+    # Execute search
     try:
-        es.index(index=index_name, id=i, body=doc)
-        print(f"Chunk {i} indexed!")
+        response = es.search(index=index_name, body=hybrid_query)
     except Exception as e:
-        print(f"Error indexing chunk {i}: {str(e)}")
-        print(f"Problematic doc: {doc}")
-        break
+        print(f"Search error: {str(e)}")
+        return []
+
+    # Format results
+    results = []
+    for hit in response["hits"]["hits"]:
+        meta = hit["_source"].get("metadata", {})
+        result = {
+            "score": f"{hit['_score']:.4f}",
+            "content": hit["_source"]["content"],
+            "tags": hit["_source"].get("tags", []),
+            "file_name": hit["_source"].get("file_name", "unknown"),
+            "file_description": hit["_source"].get("file_description", ""),
+            "page": meta.get("dl_items", {}).get("page", "N/A") if "dl_items" in meta else "N/A",
+            "source": meta.get("source", "N/A")
+        }
+        results.append(result)
+
+    # Pretty print
+    print(f"\nHybrid Search Results for '{query}' (Top {top_k}):")
+    for i, res in enumerate(results, 1):
+        print(f"{i}. Score: {res['score']}")
+        print(f"   Content: {res['content']}")
+        print(f"   Tags: {', '.join(res['tags']) or 'None'}")
+        print(f"   File: {res['file_name']}")
+        print(f"   Description: {res['file_description']}")
+        print(f"   Page: {res['page']}")
+        print(f"   Source: {res['source']}")
+        print("---")
+    print(f"Total hits: {response['hits']['total']['value']}")
+
+    return results
+
+# Test it
+query = "AI and machine learning"
+results = hybrid_search(query)
