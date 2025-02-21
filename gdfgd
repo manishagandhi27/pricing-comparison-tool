@@ -1,117 +1,35 @@
-from langchain.embeddings import HuggingFaceEmbeddings
-from elasticsearch import Elasticsearch
-import numpy as np
-import json
+def preprocess_metadata(meta):
+    """Ensure all nested values are ES-friendly."""
+    if not isinstance(meta, dict):
+        return {"value": str(meta) if meta else ""}
+    result = {}
+    for key, value in meta.items():
+        if isinstance(value, dict):
+            result[key] = preprocess_metadata(value)
+        else:
+            # Convert problematic types to strings
+            result[key] = str(value) if value is not None else ""
+    return result
 
-# Initialize embeddings
-model_name = "sentence-transformers/all-MiniLM-L6-v2"
-embeddings = HuggingFaceEmbeddings(
-    model_name=model_name,
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True}
-)
-
-# Initialize Elasticsearch
-es = Elasticsearch(["http://localhost:9200"])
-index_name = "my_chunks_index"
-
-# Create index if not exists
-if not es.indices.exists(index=index_name):
-    es.indices.create(index=index_name, body={
-        "mappings": {
-            "properties": {
-                "content": {"type": "text"},
-                "semantic_content": {"type": "semantic_text", "inference_id": "elser_inference"},
-                "dense_embedding": {"type": "dense_vector", "dims": 384, "index": True, "similarity": "cosine"},
-                "metadata": {"type": "object"}
-            }
-        }
-    })
-
-# Example chunks and Docmeta (replace with your actual classes)
-class Docmeta:
-    def __init__(self, doc_id, page):
-        self.doc_id = doc_id
-        self.page = page
-
-class DocChunk:
-    def __init__(self, text, meta):
-        self.text = text
-        self.meta = meta
-
-chunks = [
-    DocChunk("This is the first chunk.", Docmeta("123", 1)),
-    DocChunk("Second chunk about AI.", Docmeta("123", 2))
-]
-
-# Function to make metadata serializable
-# Simplified serialization function
-def make_serializable(obj):
-    # Handle Docmeta or other objects with __dict__
-    if hasattr(obj, '__dict__'):
-        result = {}
-        for key, value in obj.__dict__.items():
-            # Avoid self-references
-            if value is obj:
-                result[key] = "self_reference"
-            # Handle basic types directly
-            elif isinstance(value, (str, int, float, bool, type(None))):
-                result[key] = value
-            # Convert lists/tuples iteratively
-            elif isinstance(value, (list, tuple)):
-                result[key] = [make_serializable(item) for item in value]
-            # Convert nested dicts iteratively
-            elif isinstance(value, dict):
-                result[key] = {k: make_serializable(v) for k, v in value.items()}
-            # Fallback for other objects
-            else:
-                result[key] = str(value)
-        return result
-    # Handle basic types
-    elif isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    # Fallback
-    else:
-        return str(obj)
-# Index chunks individually
-print("Starting indexing loop...")
+# Save chunks with preprocessing
 for i, chunk in enumerate(chunks):
-    print(f"Processing chunk {i}: {chunk.text[:20]}...")
+    meta = preprocess_metadata(chunk.metadata)
+    print(f"Chunk {i} metadata: {meta}")
     
-    # Generate and serialize embedding
-    embedding = embeddings.embed_documents([chunk.text])[0]
-    if isinstance(embedding, np.ndarray):
-        embedding = embedding.tolist()
-    print(f"Embedding type: {type(embedding)}, First 5 values: {embedding[:5]}")
-    
-    # Convert metadata to a serializable dict
-    metadata = make_serializable(chunk.meta)
-    print(f"Serialized metadata: {metadata}")
-    
-    # Construct document
     doc = {
-        "content": chunk.text,
-        "semantic_content": chunk.text,
-        "dense_embedding": embedding,
-        "metadata": metadata
+        "content": chunk.page_content,
+        "dense_embedding": embeddings.embed_query(chunk.page_content).tolist(),
+        "metadata": meta,
+        "tags": ["AI", "tech"],
+        "file_description": "AI trends report",
+        "file_name": "unknown.pdf"
     }
+    print(f"Doc to index: {doc}")
     
-    # Test JSON serialization
-    try:
-        json.dumps(doc)
-        print("Doc serialized successfully")
-    except TypeError as e:
-        print(f"Serialization failed: {str(e)}")
-        print(f"Problematic doc: {doc}")
-        raise
-    
-    # Index with error handling
     try:
         es.index(index=index_name, id=i, body=doc)
-        print(f"Indexed chunk {i}")
+        print(f"Chunk {i} indexed!")
     except Exception as e:
         print(f"Error indexing chunk {i}: {str(e)}")
-        print(f"Doc causing error: {doc}")
-        raise
-
-print("Chunks indexed successfully!")
+        print(f"Problematic doc: {doc}")
+        break
