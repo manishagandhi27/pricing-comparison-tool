@@ -1,5 +1,6 @@
+from langchain.document_loaders import DoclingLoader
 from langchain.embeddings import HuggingFaceEmbeddings
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, helpers
 import numpy as np
 
 # Initialize
@@ -7,47 +8,73 @@ es = Elasticsearch(["http://localhost:9200"])
 index_name = "my_chunks_index"
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
+# Create index (unchanged)
+if not es.indices.exists(index=index_name):
+    es.indices.create(index=index_name, body={
+        "mappings": {
+            "properties": {
+                "content": {"type": "text", "copy_to": "semantic_content"},
+                "semantic_content": {"type": "semantic_text", "inference_id": "elser_inference"},
+                "dense_embedding": {"type": "dense_vector", "dims": 384, "index": true, "similarity": "cosine"},
+                "metadata": {"type": "object", "dynamic": true},
+                "tags": {"type": "keyword"},
+                "file_description": {"type": "text"},
+                "file_name": {"type": "keyword"}
+            }
+        }
+    })
+    print(f"Index {index_name} created!")
+
+# Load chunks
+loader = DoclingLoader(file_path="report.pdf")  # Adjust path
+chunks = loader.load()
+
+# Prepare bulk operations
+bulk_actions = []
+for i, chunk in enumerate(chunks):
+    meta = chunk.metadata if isinstance(chunk.metadata, dict) else {"source": str(chunk.metadata) if chunk.metadata else ""}
+    action = {
+        "_op_type": "index",  # Operation type
+        "_index": index_name,
+        "_id": str(i),  # Unique ID (stringified)
+        "_source": {
+            "content": chunk.page_content,
+            "dense_embedding": embeddings.embed_query(chunk.page_content).tolist(),
+            "metadata": meta,
+            "tags": ["AI", "tech"],
+            "file_description": "AI trends report",
+            "file_name": "unknown.pdf"
+        }
+    }
+    bulk_actions.append(action)
+
+# Execute bulk indexing
+try:
+    helpers.bulk(es, bulk_actions, chunk_size=1000, raise_on_error=True)  # Batch size of 1000
+    print(f"Successfully indexed {len(bulk_actions)} chunks in bulk!")
+except Exception as e:
+    print(f"Bulk indexing error: {str(e)}")
+
+# Your hybrid search (unchanged, for completeness)
 def hybrid_search(query, top_k=5):
-    # Generate dense embedding
     query_embedding = embeddings.embed_query(query)
     if isinstance(query_embedding, np.ndarray):
         query_embedding = query_embedding.tolist()
 
-    # Retriever-style hybrid query
     hybrid_query = {
+        "size": top_k,
         "retriever": {
             "rrf": {
                 "retrievers": [
-                    {
-                        "standard": {
-                            "query": {
-                                "match": {
-                                    "content": query  # BM25
-                                }
-                            }
-                        }
-                    },
-                    {
-                        "knn": {
-                            "field": "dense_embedding",
-                            "query_vector": query_embedding,
-                            "k": top_k,
-                            "num_candidates": 50
-                        }
-                    }
+                    {"standard": {"query": {"match": {"content": query}}}},
+                    {"standard": {"query": {"semantic": {"field": "semantic_content", "query": query}}}},
+                    {"knn": {"field": "dense_embedding", "query_vector": query_embedding, "k": top_k, "num_candidates": 50}}
                 ]
             }
         }
     }
 
-    # Execute
-    try:
-        response = es.search(index=index_name, body=hybrid_query)
-    except Exception as e:
-        print(f"Search error: {str(e)}")
-        return []
-
-    # Format results
+    response = es.search(index=index_name, body=hybrid_query)
     results = []
     for hit in response["hits"]["hits"]:
         meta = hit["_source"].get("metadata", {})
@@ -62,7 +89,6 @@ def hybrid_search(query, top_k=5):
         }
         results.append(result)
 
-    # Pretty print
     print(f"\nHybrid Search Results for '{query}' (Top {top_k}):")
     for i, res in enumerate(results, 1):
         print(f"{i}. Score: {res['score']}")
@@ -75,8 +101,6 @@ def hybrid_search(query, top_k=5):
         print("---")
     print(f"Total hits: {response['hits']['total']['value']}")
 
-    return results
-
 # Test
 query = "AI and machine learning"
-results = hybrid_search(query)
+hybrid_search(query)
