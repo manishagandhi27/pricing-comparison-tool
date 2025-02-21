@@ -1,20 +1,82 @@
-def test_text_expansion(query):
-    test_query = {
-        "query": {
-            "text_expansion": {
-                "semantic_content": {
-                    "model_id": "elser_inference",
-                    "model_text": query
-                }
+from langchain.embeddings import HuggingFaceEmbeddings
+from elasticsearch import Elasticsearch
+import numpy as np
+
+# Initialize
+es = Elasticsearch(["http://localhost:9200"])
+index_name = "my_chunks_index"
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+def hybrid_search(query, top_k=5):
+    # Generate dense embedding
+    query_embedding = embeddings.embed_query(query)
+    if isinstance(query_embedding, np.ndarray):
+        query_embedding = query_embedding.tolist()
+
+    # Retriever-style hybrid query
+    hybrid_query = {
+        "retriever": {
+            "rrf": {
+                "retrievers": [
+                    {
+                        "standard": {
+                            "query": {
+                                "match": {
+                                    "content": query  # BM25
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "knn": {
+                            "field": "dense_embedding",
+                            "query_vector": query_embedding,
+                            "k": top_k,
+                            "num_candidates": 50
+                        }
+                    }
+                ]
             }
         }
     }
-    try:
-        response = es.search(index=index_name, body=test_query)
-        print("Text Expansion Results:")
-        for hit in response["hits"]["hits"]:
-            print(f"Score: {hit['_score']:.4f}, Content: {hit['_source']['content']}")
-    except Exception as e:
-        print(f"Error: {str(e)}")
 
-test_text_expansion("AI and machine learning")
+    # Execute
+    try:
+        response = es.search(index=index_name, body=hybrid_query)
+    except Exception as e:
+        print(f"Search error: {str(e)}")
+        return []
+
+    # Format results
+    results = []
+    for hit in response["hits"]["hits"]:
+        meta = hit["_source"].get("metadata", {})
+        result = {
+            "score": f"{hit['_score']:.4f}",
+            "content": hit["_source"]["content"],
+            "tags": hit["_source"].get("tags", []),
+            "file_name": hit["_source"].get("file_name", "unknown"),
+            "file_description": hit["_source"].get("file_description", ""),
+            "page": meta.get("dl_items", {}).get("page", "N/A") if "dl_items" in meta else "N/A",
+            "source": meta.get("source", "N/A")
+        }
+        results.append(result)
+
+    # Pretty print
+    print(f"\nHybrid Search Results for '{query}' (Top {top_k}):")
+    for i, res in enumerate(results, 1):
+        print(f"{i}. Score: {res['score']}")
+        print(f"   Content: {res['content']}")
+        print(f"   Tags: {', '.join(res['tags']) or 'None'}")
+        print(f"   File: {res['file_name']}")
+        print(f"   Description: {res['file_description']}")
+        print(f"   Page: {res['page']}")
+        print(f"   Source: {res['source']}")
+        print("---")
+    print(f"Total hits: {response['hits']['total']['value']}")
+
+    return results
+
+# Test
+query = "AI and machine learning"
+results = hybrid_search(query)
