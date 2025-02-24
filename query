@@ -1,0 +1,35 @@
+WITH name_match AS (
+    SELECT 
+        file_id, file_name, file_hash, file_desc, uploaded_date,
+        'name_match' AS match_type,
+        similarity(file_name, $1) AS similarity_score
+    FROM document_metadata
+    WHERE similarity(file_name, $1) > 0.7
+    ORDER BY uploaded_date DESC
+    LIMIT 1
+),
+hash_match AS (
+    SELECT 
+        file_id, file_name, file_hash, file_desc, uploaded_date,
+        'content_match' AS match_type,
+        1.0 AS similarity_score  -- Exact match, full confidence
+    FROM document_metadata
+    WHERE file_hash = $2
+    ORDER BY uploaded_date DESC
+    LIMIT 1
+),
+desc_match AS (
+    SELECT 
+        file_id, file_name, file_hash, file_desc, uploaded_date,
+        'desc_match' AS match_type,
+        (1 - (file_desc_embedding <=> $3::vector)) AS similarity_score  -- Convert distance to similarity
+    FROM document_metadata
+    WHERE file_desc_embedding <=> $3::vector < 0.3
+    ORDER BY uploaded_date DESC
+    LIMIT 1
+)
+SELECT * FROM name_match
+UNION
+SELECT * FROM hash_match
+UNION
+SELECT * FROM desc_match;
