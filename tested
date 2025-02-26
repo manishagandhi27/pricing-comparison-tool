@@ -1,35 +1,75 @@
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, helpers
+import your_embedding_model  # Replace with your embedding library
 
-# Initialize Elasticsearch
-es = Elasticsearch(["http://localhost:9200"])
-index_name = "my_chunks_index"
+es = Elasticsearch("http://localhost:9200")
+chunks = ["chunk1 text", "chunk2 text", ..., "chunk100 text"]  # Your 100 chunks
 
-# Define a test query
-query = "AI and machine learning"
-print(f"Query: {query}")
-
-# Text expansion query
-text_expansion_query = {
-    "query": {
-        "text_expansion": {
-            "semantic_content": {
-                "model_id": "elser_inference",
-                "model_text": query,
-                "boost": 1.0  # Optional: Adjusts weighting
-            }
+# Prepare bulk documents with explicit IDs
+bulk_docs = []
+chunk_id_map = {}  # To track chunk content to ID
+for i, chunk in enumerate(chunks, start=1):  # Start IDs at 1
+    chunk_id = f"chunk_{i}"
+    embedding = your_embedding_model.encode(chunk).tolist()
+    doc = {
+        "_op_type": "index",  # Explicitly specify operation type
+        "_index": "my-index",
+        "_id": chunk_id,  # Assign a custom ID
+        "_source": {
+            "content": chunk,
+            "dense_embedding": embedding,
+            "other_info": "some metadata"
         }
     }
-}
+    bulk_docs.append(doc)
+    chunk_id_map[chunk_id] = chunk  # Optional: map IDs to content for debugging
 
-# Execute the search
+# Execute bulk operation
 try:
-    response = es.search(index=index_name, body=text_expansion_query)
-    print("\nText Expansion Results:")
-    for hit in response["hits"]["hits"]:
-        score = hit["_score"]
-        content = hit["_source"]["content"]
-        metadata = hit["_source"].get("metadata", {})
-        print(f"Score: {score:.4f}, Content: {content}, Metadata: {metadata}")
-    print(f"Total hits: {response['hits']['total']['value']}")
+    success_count, result = helpers.bulk(
+        es,
+        bulk_docs,
+        raise_on_error=False,  # Don't stop on errors
+        stats_only=False       # Return full item details
+    )
 except Exception as e:
-    print(f"Error: {str(e)}")
+    print(f"Bulk failed unexpectedly: {e}")
+    success_count, result = 0, []
+
+# Analyze the response
+successful_ids = []
+failed_ids = []
+if isinstance(result, list):  # Full response with item details
+    for item in result:
+        action_result = item["index"]  # Assuming "index" operation
+        doc_id = action_result["_id"]
+        status = action_result["status"]
+        if status in (200, 201):  # Success
+            successful_ids.append(doc_id)
+        else:  # Failure
+            failed_ids.append((doc_id, action_result.get("error", "Unknown error")))
+
+print(f"Successfully indexed: {len(successful_ids)}")
+print(f"Failed: {len(failed_ids)}")
+if failed_ids:
+    print("Failed IDs and errors:", failed_ids)
+
+# Rollback if any failures occurred
+if failed_ids:
+    print("Rolling back successful operations...")
+    delete_actions = [
+        {"_op_type": "delete", "_index": "my-index", "_id": doc_id}
+        for doc_id in successful_ids
+    ]
+    try:
+        delete_success, delete_result = helpers.bulk(
+            es,
+            delete_actions,
+            raise_on_error=True  # Fail fast on delete errors
+        )
+        print(f"Rolled back {delete_success} documents")
+    except Exception as e:
+        print(f"Rollback failed: {e}")
+        # Handle partial rollback failure (e.g., retry or log)
+else:
+    print("All documents indexed successfully!")
+    # Return or use successful_ids as needed
