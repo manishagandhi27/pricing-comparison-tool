@@ -1,0 +1,48 @@
+POST my-index/_search
+{
+  "retriever": {
+    "text_similarity_reranker": {
+      "retriever": {
+        "rrf": {
+          "retrievers": [
+            {
+              "standard": {
+                "query": {
+                  "match": {
+                    "content": "your search query"
+                  }
+                }
+              }
+            },
+            {
+              "standard": {
+                "query": {
+                  "text_expansion": {
+                    "semantic_field": {
+                      "model_id": "your-semantic-model",
+                      "model_text": "your search query"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "knn": {
+                "field": "dense_embedding",
+                "query_vector": [0.1, 0.2, ...],  // Your dense query embedding
+                "k": 10,
+                "num_candidates": 50
+              }
+            }
+          ],
+          "rank_constant": 20
+        }
+      },
+      "field": "content",
+      "inference_id": "my-rerank-model",
+      "inference_text": "your search query",
+      "max_score": 0.6  // Optional: filter low-relevance results
+    }
+  },
+  "size": 5
+}
