@@ -1,142 +1,123 @@
-from typing import List, Dict, Optional
+from typing import List, Optional
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.tools import tool
 from langchain.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI  # Replace with your LLM
 
-# Structured State (Typed for Scalability)
+# Structured State
 class State(dict):
-    messages: List[str]           # Event bus simulation + logging
-    code: Optional[str]           # Input code from Dev Agent
-    language: Optional[str]       # Detected language
+    messages: List[str]           # Event bus mock + logging
+    code_name: Optional[str]      # Input: GitLab repo/branch
+    code_content: Optional[str]   # Fetched code
     test_cases: Optional[List[str]]  # Generated test cases
-    test_results: Optional[List[str]]  # Execution results
-    report: Optional[str]         # Final test report
-    next: Optional[str]           # Workflow routing
+    commit_status: Optional[str]  # Commit result
+    next: Optional[str]          # Workflow routing
 
-# Mock Tools (Efficient, Replaceable)
+# Mock Tools (Replaceable with GitLab APIs)
 @tool
-def generate_test_cases(code: str, language: str) -> List[str]:
-    """Generate test cases based on code and language."""
-    if "java" in language.lower():
-        return ["assert add(2, 3) == 5", "assert add(0, 0) == 0", "assert add(-1, 1) == 0"]
-    return ["expect(add(2, 3)).toBe(5)", "expect(add(0, 0)).toBe(0)"]  # Python/JS default
+def checkout_code(code_name: str) -> str:
+    """Mock: Fetch code from GitLab."""
+    return "int add(int a, int b) { return a + b; }"  # Java example
 
 @tool
-def execute_tests(test_cases: List[str]) -> List[str]:
-    """Execute test cases and return results."""
-    return ["passed" if "assert" in tc or "expect" in tc else "failed" for tc in test_cases]
+def commit_to_gitlab(test_cases: List[str], code_name: str) -> str:
+    """Mock: Commit test cases to GitLab."""
+    return "Committed to test-cases-branch"
 
-# LLM Setup (Optimized for CoT)
+# LLM Setup (CoT for Language + Test Cases)
 llm = ChatOpenAI(model="gpt-3.5-turbo", api_key="your-api-key-here")
 cot_prompt = ChatPromptTemplate.from_template(
     "Input code: '{code}'\n"
     "Think step-by-step:\n"
     "1. Identify the programming language (e.g., Java, Python).\n"
     "2. Understand what the code does.\n"
-    "3. Suggest types of test cases (e.g., edge cases, normal cases).\n"
-    "Output only your reasoning as a concise string."
+    "3. Generate specific test cases with appropriate syntax for that language.\n"
+    "Output your reasoning as a string, followed by 'TEST CASES:' and a list of test cases (one per line)."
 )
 
-# Nodes (Modular and Efficient)
+# Nodes
 def supervisor_node(state: State) -> State:
-    """Route workflow based on state progress."""
-    if state.get("code") and not state.get("language"):
+    """Route workflow."""
+    if state.get("code_name") and not state.get("code_content"):
+        state["next"] = "fetch"
+    elif state.get("code_content") and not state.get("test_cases"):
         state["next"] = "reason"
-    elif state.get("language") and not state.get("test_cases"):
-        state["next"] = "generate"
-    elif state.get("test_cases") and not state.get("test_results"):
-        state["next"] = "execute"
-    elif state.get("test_results") and not state.get("report"):
-        state["next"] = "report"
-    elif state.get("report"):
+    elif state.get("test_cases") and not state.get("commit_status"):
+        state["next"] = "commit"
+    elif state.get("commit_status"):
         state["next"] = "done"
     else:
-        state["next"] = "reason"  # Default
+        state["next"] = "fetch"
+    return state
+
+def fetch_node(state: State) -> State:
+    """Fetch code from GitLab."""
+    code = checkout_code.invoke(state["code_name"])
+    state["code_content"] = code
+    state["messages"].append(f"TestCaseAgent: Fetched code: {code}")
+    state["next"] = "reason"
     return state
 
 def reason_node(state: State) -> State:
-    """Reason about code using CoT."""
-    response = llm.invoke(cot_prompt.format(code=state["code"]))
-    reasoning = response.content
-    state["messages"].append(f"TestAgent: {reasoning}")
-    # Simple language detection (scalable to LLM parsing)
-    language = "Java" if "int" in state["code"] else "Python"
-    state["language"] = language
-    state["messages"].append(f"TestAgent: Detected language: {language}")
-    state["next"] = "generate"
+    """Reason about code and generate test cases via CoT."""
+    response = llm.invoke(cot_prompt.format(code=state["code_content"]))
+    output = response.content
+    state["messages"].append(f"TestCaseAgent: {output}")
+    # Parse test cases from output (after 'TEST CASES:')
+    test_cases = output.split("TEST CASES:")[1].strip().split("\n") if "TEST CASES:" in output else []
+    state["test_cases"] = [tc.strip() for tc in test_cases if tc.strip()]
+    state["next"] = "commit"
     return state
 
-def generate_node(state: State) -> State:
-    """Generate test cases using tool."""
-    test_cases = generate_test_cases.invoke({"code": state["code"], "language": state["language"]})
-    state["test_cases"] = test_cases
-    state["messages"].append(f"TestAgent: Generated test cases: {test_cases}")
-    state["next"] = "execute"
-    return state
-
-def execute_node(state: State) -> State:
-    """Execute test cases using tool."""
-    results = execute_tests.invoke(state["test_cases"])
-    state["test_results"] = results
-    state["messages"].append(f"TestAgent: Executed tests, Results: {results}")
-    state["next"] = "report"
-    return state
-
-def report_node(state: State) -> State:
-    """Generate test report."""
-    passed = state["test_results"].count("passed")
-    total = len(state["test_results"])
-    report = f"Test Report: {passed}/{total} passed. Details: {dict(zip(state['test_cases'], state['test_results']))}"
-    state["report"] = report
-    state["messages"].append(f"TestAgent: {report}")
+def commit_node(state: State) -> State:
+    """Commit test cases to GitLab."""
+    status = commit_to_gitlab.invoke({"test_cases": state["test_cases"], "code_name": state["code_name"]})
+    state["commit_status"] = status
+    state["messages"].append(f"TestCaseAgent: {status}")
     state["next"] = "done"
     return state
 
-# Build Graph (Scalable Design)
+# Build Graph
 graph = StateGraph(State)
 
 # Add Nodes
 graph.add_node("supervisor", supervisor_node)
-graph.add_node("reason", reason_node)      # CoT
-graph.add_node("generate", generate_node)  # Test case generation
-graph.add_node("execute", execute_node)    # Test execution
-graph.add_node("report", report_node)      # Report generation
+graph.add_node("fetch", fetch_node)        # Fetch code
+graph.add_node("reason", reason_node)      # CoT + Test generation
+graph.add_node("commit", commit_node)      # Commit back
 
-# Define Edges (Efficient Routing)
+# Define Edges
 graph.add_edge(START, "supervisor")
 graph.add_conditional_edges(
     "supervisor",
-    lambda s: s.get("next", "reason"),
+    lambda s: s.get("next", "fetch"),
     {
+        "fetch": "fetch",
         "reason": "reason",
-        "generate": "generate",
-        "execute": "execute",
-        "report": "report",
+        "commit": "commit",
         "done": END
     }
 )
+graph.add_edge("fetch", "supervisor")
 graph.add_edge("reason", "supervisor")
-graph.add_edge("generate", "supervisor")
-graph.add_edge("execute", "supervisor")
-graph.add_edge("report", "supervisor")
+graph.add_edge("commit", "supervisor")
 
-# Compile with Checkpointer (Memory Persistence)
+# Compile with Checkpointer
 checkpointer = MemorySaver()
 graph.compile(checkpointer=checkpointer)
 
 # Run Demo
 initial_state = {
-    "messages": ["DevAgent: Test this code"],
-    "code": "int add(int a, int b) { return a + b; }",  # Java example
-    "next": "reason"
+    "messages": ["DevAgent: Generate test cases for myproject/feature-xyz"],
+    "code_name": "myproject/feature-xyz",
+    "next": "fetch"
 }
-config = {"configurable": {"thread_id": "test-thread-1"}}
+config = {"configurable": {"thread_id": "test-case-thread-1"}}
 result = graph.invoke(initial_state, config=config)
 
 # Print Results
 print("Final Messages:")
 for msg in result["messages"]:
     print(msg)
-print(f"Final Report: {result['report']}")
+print(f"Test Cases: {result['test_cases']}, Commit Status: {result['commit_status']}")
