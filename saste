@@ -1,0 +1,36 @@
+from langgraph.graph import StateGraph, END, START
+from langgraph.types import Command
+from typing import TypedDict, Annotated, Literal
+import operator
+
+# Define the state
+class State(TypedDict):
+    value: Annotated[list[str], operator.add]
+
+# Node functions with Command
+def node_a(state: State) -> Command[Literal["node_b"]]:
+    print("In Node A")
+    return Command(
+        update={"value": ["Message from A"]},
+        goto="node_b"  # Must match a node name exactly
+    )
+
+def node_b(state: State) -> Command[Literal[END]]:
+    print("In Node B")
+    return Command(
+        update={"value": ["Message from B"]},
+        goto=END  # Must be the END constant, not a string
+    )
+
+# Build the graph
+workflow = StateGraph(State)
+workflow.add_node("node_a", node_a)
+workflow.add_node("node_b", node_b)
+
+# Entry point
+workflow.add_edge(START, "node_a")
+
+# Compile and run
+graph = workflow.compile()
+result = graph.invoke({"value": []})
+print(result)
