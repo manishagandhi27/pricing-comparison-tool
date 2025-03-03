@@ -1,0 +1,141 @@
+from typing import List, Optional
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langchain.tools import tool
+import subprocess
+import sys
+import os
+
+# Structured State
+class State(dict):
+    messages: List[str]
+    code_name: Optional[str]
+    code_content: Optional[str]
+    test_cases: Optional[List[str]]
+    test_results: Optional[List[str]]
+    report: Optional[str]
+    setup_status: Optional[str]  # Tracks dependency setup
+
+# Tools
+@tool
+def fetch_from_gitlab(code_name: str, file_type: str) -> str:
+    """Mock fetch from GitLab for Python."""
+    if file_type == "code":
+        return "def add(a, b): return a + b"
+    elif file_type == "tests":
+        return "\n".join(["assert add(2, 3) == 5", "assert add(0, 0) == 0"])
+
+@tool
+def ensure_pytest() -> bool:
+    """Check and install PyTest if missing."""
+    try:
+        # Check if pytest is importable
+        import pytest
+        return True
+    except ImportError:
+        try:
+            # Install pytest via pip
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "pytest"])
+            import pytest  # Verify installation
+            return True
+        except subprocess.CalledProcessError as e:
+            return False
+
+@tool
+def execute_tests(code: str, test_cases: List[str]) -> List[str]:
+    """Execute Python test cases with PyTest."""
+    # Write code file
+    with open("add.py", "w") as f:
+        f.write(code)
+    # Write test file
+    with open("test_add.py", "w") as f:
+        f.write("from add import add\n" + "\n".join([f"def test_{i}(): {tc}" for i, tc in enumerate(test_cases)]))
+    # Run PyTest
+    result = subprocess.run(["pytest", "test_add.py", "--quiet"], capture_output=True)
+    output = result.stdout.decode()
+    return ["passed" if "passed" in line else "failed" for line in output.splitlines() if "test_" in line]
+
+# Nodes
+def setup_node(state: State) -> State:
+    """Ensure Python runtime and PyTest are ready."""
+    # Check Python runtime
+    if not shutil.which("python") and not shutil.which("python3"):
+        state["setup_status"] = "Failed: Python runtime not found"
+        state["messages"].append("TestAgent: " + state["setup_status"])
+        return state
+    
+    # Ensure PyTest
+    if ensure_pytest():
+        state["setup_status"] = "Success: PyTest ready"
+    else:
+        state["setup_status"] = "Failed: Could not install PyTest"
+    state["messages"].append(f"TestAgent: {state['setup_status']}")
+    return state
+
+def fetch_node(state: State) -> State:
+    """Fetch code and test cases."""
+    if "Failed" in state.get("setup_status", ""):
+        return state  # Skip if setup failed
+    code = fetch_from_gitlab.invoke({"code_name": state["code_name"], "file_type": "code"})
+    tests = fetch_from_gitlab.invoke({"code_name": state["code_name"], "file_type": "tests"})
+    state["code_content"] = code
+    state["test_cases"] = tests.split("\n") if tests else []
+    state["messages"].append(f"TestAgent: Fetched code: {code}")
+    state["messages"].append(f"TestAgent: Fetched test cases: {state['test_cases']}")
+    return state
+
+def execute_node(state: State) -> State:
+    """Execute test cases if setup succeeded."""
+    if "Failed" in state.get("setup_status", ""):
+        state["test_results"] = ["failed"] * len(state["test_cases"]) if state.get("test_cases") else ["failed"]
+        state["messages"].append("TestAgent: Execution skipped due to setup failure")
+        return state
+    results = execute_tests.invoke({"code": state["code_content"], "test_cases": state["test_cases"]})
+    state["test_results"] = results
+    state["messages"].append(f"TestAgent: Executed tests for Python, Results: {results}")
+    return state
+
+def report_node(state: State) -> State:
+    """Generate test report."""
+    passed = state["test_results"].count("passed") if state.get("test_results") else 0
+    total = len(state["test_results"]) if state.get("test_results") else 0
+    report = f"Test Report (Python): {passed}/{total} passed. Details: {dict(zip(state['test_cases'], state['test_results'])) if state.get('test_cases') and state.get('test_results') else 'N/A'}"
+    state["report"] = report
+    state["messages"].append(f"TestAgent: {report}")
+    state["messages"].append("TestAgent: Tests completed")
+    return state
+
+# Clean Up Files
+def cleanup_files():
+    for f in ["add.py", "test_add.py"]:
+        if os.path.exists(f):
+            os.remove(f)
+
+# Build Graph
+graph = StateGraph(State)
+graph.add_node("setup", setup_node)
+graph.add_node("fetch", fetch_node)
+graph.add_node("execute", execute_node)
+graph.add_node("report", report_node)
+graph.add_edge(START, "setup")
+graph.add_edge("setup", "fetch")
+graph.add_edge("fetch", "execute")
+graph.add_edge("execute", "report")
+graph.add_edge("report", END)
+checkpointer = MemorySaver()
+graph.compile(checkpointer=checkpointer)
+
+# Run Demo
+initial_state = {
+    "messages": ["TestCaseAgent: Execute tests for myproject/python"],
+    "code_name": "myproject/python"
+}
+config = {"configurable": {"thread_id": "test-thread-python"}}
+result = graph.invoke(initial_state, config=config)
+
+# Print Results
+print("Final Messages:")
+for msg in result["messages"]:
+    print(msg)
+print(f"Report: {result['report']}")
+cleanup_files()
