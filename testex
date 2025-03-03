@@ -1,0 +1,155 @@
+from typing import List, Optional, Dict
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langchain.tools import tool
+import subprocess
+import os
+
+# Structured State
+class State(dict):
+    messages: List[str]
+    code_name: Optional[str]
+    language: Optional[str]
+    code_content: Optional[str]
+    test_cases: Optional[List[str]]
+    test_results: Optional[List[str]]
+    report: Optional[str]
+
+# Fetch Tool (Simulated GitLab Fetch)
+@tool
+def fetch_from_gitlab(code_name: str, file_type: str) -> str:
+    """Fetch code or test cases (simulated for local demo)."""
+    if file_type == "code":
+        return {
+            "Java": "int add(int a, int b) { return a + b; }",
+            "Python": "def add(a, b): return a + b",
+            "Node.js": "function add(a, b) { return a + b; }"
+        }[code_name.split("/")[1].capitalize()]
+    elif file_type == "tests":
+        return {
+            "Java": "\n".join(["assert add(2, 3) == 5", "assert add(0, 0) == 0"]),
+            "Python": "\n".join(["assert add(2, 3) == 5", "assert add(0, 0) == 0"]),
+            "Node.js": "\n".join(["expect(add(2, 3)).toBe(5)", "expect(add(0, 0)).toBe(0)"])
+        }[code_name.split("/")[1].capitalize()]
+
+# Real Execution Tool
+@tool
+def execute_tests(code: str, test_cases: List[str], language: str) -> List[str]:
+    """Execute test cases for Java, Python, or Node.js."""
+    if language == "Java":
+        # Write code file
+        with open("Add.java", "w") as f:
+            f.write("public class Add { " + code + " }")
+        # Write test file
+        with open("TestAdd.java", "w") as f:
+            f.write(
+                "import org.junit.Test;\n"
+                "import static org.junit.Assert.*;\n"
+                "public class TestAdd {\n" +
+                "\n".join([f"  @Test public void test{i}() {{ {tc}; }}" for i, tc in enumerate(test_cases)]) +
+                "\n}"
+            )
+        # Compile
+        compile_cmd = ["javac", "-cp", "junit-4.13.2.jar:hamcrest-core-1.3.jar:.", "Add.java", "TestAdd.java"]
+        compile_result = subprocess.run(compile_cmd, capture_output=True)
+        if compile_result.returncode != 0:
+            return [f"Compile failed: {compile_result.stderr.decode()}"] * len(test_cases)
+        # Run JUnit
+        run_cmd = ["java", "-cp", "junit-4.13.2.jar:hamcrest-core-1.3.jar:.", "org.junit.runner.JUnitCore", "TestAdd"]
+        result = subprocess.run(run_cmd, capture_output=True)
+        output = result.stdout.decode()
+        failures = [line for line in output.splitlines() if "FAILURES!!!" in line or "test" in line.lower()]
+        if "FAILURES!!!" in output:
+            return ["failed" if any(f"test{i}" in f for f in failures) else "passed" for i in range(len(test_cases))]
+        return ["passed"] * len(test_cases)
+
+    elif language == "Python":
+        # Write code file
+        with open("add.py", "w") as f:
+            f.write(code)
+        # Write test file
+        with open("test_add.py", "w") as f:
+            f.write("from add import add\n" + "\n".join([f"def test_{i}(): {tc}" for i, tc in enumerate(test_cases)]))
+        # Run PyTest
+        result = subprocess.run(["pytest", "test_add.py", "--quiet"], capture_output=True)
+        output = result.stdout.decode()
+        return ["passed" if "passed" in line else "failed" for line in output.splitlines() if "test_" in line]
+
+    elif language == "Node.js":
+        # Write code file
+        with open("add.js", "w") as f:
+            f.write(f"module.exports = {{ add: {code} }};")
+        # Write test file
+        with open("add.test.js", "w") as f:
+            f.write(
+                "const { add } = require('./add');\n" +
+                "\n".join([f"test('test_{i}', () => {{ {tc}; }});" for i, tc in enumerate(test_cases)])
+            )
+        # Run Jest
+        result = subprocess.run(["jest", "add.test.js", "--silent"], capture_output=True)
+        output = result.stdout.decode()
+        return ["passed" if "PASS" in output else "failed" for _ in test_cases]
+
+    return ["failed"] * len(test_cases)
+
+# Nodes
+def fetch_node(state: State) -> State:
+    """Fetch code and test cases."""
+    code = fetch_from_gitlab.invoke({"code_name": state["code_name"], "file_type": "code"})
+    tests = fetch_from_gitlab.invoke({"code_name": state["code_name"], "file_type": "tests"})
+    state["code_content"] = code
+    state["test_cases"] = tests.split("\n") if tests else []
+    state["messages"].append(f"TestAgent: Fetched code: {code}")
+    state["messages"].append(f"TestAgent: Fetched test cases: {state['test_cases']}")
+    return state
+
+def execute_node(state: State) -> State:
+    """Execute test cases."""
+    results = execute_tests.invoke({"code": state["code_content"], "test_cases": state["test_cases"], "language": state["language"]})
+    state["test_results"] = results
+    state["messages"].append(f"TestAgent: Executed tests for {state['language']}, Results: {results}")
+    return state
+
+def report_node(state: State) -> State:
+    """Generate test report."""
+    passed = state["test_results"].count("passed")
+    total = len(state["test_results"])
+    report = f"Test Report ({state['language']}): {passed}/{total} passed. Details: {dict(zip(state['test_cases'], state['test_results']))}"
+    state["report"] = report
+    state["messages"].append(f"TestAgent: {report}")
+    state["messages"].append("TestAgent: Tests completed")
+    return state
+
+# Clean Up Files
+def cleanup_files():
+    for f in ["Add.java", "TestAdd.java", "add.py", "test_add.py", "add.js", "add.test.js"]:
+        if os.path.exists(f):
+            os.remove(f)
+
+# Build Graph
+graph = StateGraph(State)
+graph.add_node("fetch", fetch_node)
+graph.add_node("execute", execute_node)
+graph.add_node("report", report_node)
+graph.add_edge(START, "fetch")
+graph.add_edge("fetch", "execute")
+graph.add_edge("execute", "report")
+graph.add_edge("report", END)
+checkpointer = MemorySaver()
+graph.compile(checkpointer=checkpointer)
+
+# Run Demo for All Languages
+languages = ["Java", "Python", "Node.js"]
+for lang in languages:
+    initial_state = {
+        "messages": [f"TestCaseAgent: Execute tests for myproject/{lang.lower()}"],
+        "code_name": f"myproject/{lang.lower()}",
+        "language": lang
+    }
+    config = {"configurable": {"thread_id": f"test-thread-{lang.lower()}"}}
+    result = graph.invoke(initial_state, config=config)
+    print(f"\nResults for {lang}:")
+    for msg in result["messages"]:
+        print(msg)
+    print(f"Report: {result['report']}")
+    cleanup_files()  # Remove temp files after each run
