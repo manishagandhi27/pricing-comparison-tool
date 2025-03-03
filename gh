@@ -1,91 +1,142 @@
+from typing import List, Dict, Optional
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 from langchain.tools import tool
 from langchain.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI  # Replace with your LLM
 
-# Mock Tools
-@tool
-def generate_tests(code, language):
-    if "java" in language.lower():
-        return ["assert add(2, 3) == 5", "assert add(0, 0) == 0"]
-    return ["expect(add(2, 3)).toBe(5)"]  # React/JS default
-
-@tool
-def run_tests(tests):
-    return ["passed" if "assert" in t or "expect" in t else "failed" for t in tests]
-
-# State Definition
+# Structured State (Typed for Scalability)
 class State(dict):
-    messages: list    # Log reasoning
-    code: str        # Memory: Input code
-    language: str    # Memory: Detected language
-    tests: list      # Generated tests
-    results: list    # Test outcomes
-    next: str       # Workflow routing
+    messages: List[str]           # Event bus simulation + logging
+    code: Optional[str]           # Input code from Dev Agent
+    language: Optional[str]       # Detected language
+    test_cases: Optional[List[str]]  # Generated test cases
+    test_results: Optional[List[str]]  # Execution results
+    report: Optional[str]         # Final test report
+    next: Optional[str]           # Workflow routing
 
-# LLM Setup (replace with your model/key)
-llm = ChatOpenAI(model="gpt-3.5-turbo", api_key="your-key-here")
+# Mock Tools (Efficient, Replaceable)
+@tool
+def generate_test_cases(code: str, language: str) -> List[str]:
+    """Generate test cases based on code and language."""
+    if "java" in language.lower():
+        return ["assert add(2, 3) == 5", "assert add(0, 0) == 0", "assert add(-1, 1) == 0"]
+    return ["expect(add(2, 3)).toBe(5)", "expect(add(0, 0)).toBe(0)"]  # Python/JS default
 
-# Nodes
-def supervisor_node(state):
-    if "code" in state and not state.get("language"):
-        return Command(goto="reason")  # Analyze code
-    if state.get("tests") and not state.get("results"):
-        return Command(goto="execute")  # Run tests
-    if state.get("results"):
-        return Command(goto="done")    # Finish
-    return Command(goto="reason")
+@tool
+def execute_tests(test_cases: List[str]) -> List[str]:
+    """Execute test cases and return results."""
+    return ["passed" if "assert" in tc or "expect" in tc else "failed" for tc in test_cases]
 
-def reason_node(state):
-    # CoT Prompt
-    prompt = ChatPromptTemplate.from_template(
-        "Input code: '{code}'\n"
-        "Think step-by-step:\n"
-        "1. Identify the programming language (e.g., Java, React/JS).\n"
-        "2. Understand what the code does.\n"
-        "3. Suggest test cases.\n"
-        "Output your reasoning, language, and test request."
-    )
-    response = llm.invoke(prompt.format(code=state["code"]))
+# LLM Setup (Optimized for CoT)
+llm = ChatOpenAI(model="gpt-3.5-turbo", api_key="your-api-key-here")
+cot_prompt = ChatPromptTemplate.from_template(
+    "Input code: '{code}'\n"
+    "Think step-by-step:\n"
+    "1. Identify the programming language (e.g., Java, Python).\n"
+    "2. Understand what the code does.\n"
+    "3. Suggest types of test cases (e.g., edge cases, normal cases).\n"
+    "Output only your reasoning as a concise string."
+)
+
+# Nodes (Modular and Efficient)
+def supervisor_node(state: State) -> State:
+    """Route workflow based on state progress."""
+    if state.get("code") and not state.get("language"):
+        state["next"] = "reason"
+    elif state.get("language") and not state.get("test_cases"):
+        state["next"] = "generate"
+    elif state.get("test_cases") and not state.get("test_results"):
+        state["next"] = "execute"
+    elif state.get("test_results") and not state.get("report"):
+        state["next"] = "report"
+    elif state.get("report"):
+        state["next"] = "done"
+    else:
+        state["next"] = "reason"  # Default
+    return state
+
+def reason_node(state: State) -> State:
+    """Reason about code using CoT."""
+    response = llm.invoke(cot_prompt.format(code=state["code"]))
     reasoning = response.content
-    state["messages"].append(f"Reasoning: {reasoning}")
-    # Mock parsing (simplified)
-    language = "Java" if "int" in state["code"] else "React/JS"
+    state["messages"].append(f"TestAgent: {reasoning}")
+    # Simple language detection (scalable to LLM parsing)
+    language = "Java" if "int" in state["code"] else "Python"
     state["language"] = language
-    state["messages"].append(f"Detected language: {language}. Generate tests.")
-    return Command(goto="execute")
+    state["messages"].append(f"TestAgent: Detected language: {language}")
+    state["next"] = "generate"
+    return state
 
-def execute_node(state):
-    # Generate and Run Tests
-    tests = generate_tests.invoke({"code": state["code"], "language": state["language"]})
-    state["tests"] = tests
-    results = run_tests.invoke(tests)
-    state["results"] = results
-    state["messages"].append(f"Tests: {tests}, Results: {results}")
-    return Command(goto="supervisor")
+def generate_node(state: State) -> State:
+    """Generate test cases using tool."""
+    test_cases = generate_test_cases.invoke({"code": state["code"], "language": state["language"]})
+    state["test_cases"] = test_cases
+    state["messages"].append(f"TestAgent: Generated test cases: {test_cases}")
+    state["next"] = "execute"
+    return state
 
-# Build Graph
+def execute_node(state: State) -> State:
+    """Execute test cases using tool."""
+    results = execute_tests.invoke(state["test_cases"])
+    state["test_results"] = results
+    state["messages"].append(f"TestAgent: Executed tests, Results: {results}")
+    state["next"] = "report"
+    return state
+
+def report_node(state: State) -> State:
+    """Generate test report."""
+    passed = state["test_results"].count("passed")
+    total = len(state["test_results"])
+    report = f"Test Report: {passed}/{total} passed. Details: {dict(zip(state['test_cases'], state['test_results']))}"
+    state["report"] = report
+    state["messages"].append(f"TestAgent: {report}")
+    state["next"] = "done"
+    return state
+
+# Build Graph (Scalable Design)
 graph = StateGraph(State)
+
+# Add Nodes
 graph.add_node("supervisor", supervisor_node)
-graph.add_node("reason", reason_node)    # CoT
-graph.add_node("execute", execute_node)  # Tools
+graph.add_node("reason", reason_node)      # CoT
+graph.add_node("generate", generate_node)  # Test case generation
+graph.add_node("execute", execute_node)    # Test execution
+graph.add_node("report", report_node)      # Report generation
+
+# Define Edges (Efficient Routing)
 graph.add_edge(START, "supervisor")
-graph.add_conditional_edges("supervisor", lambda s: s["next"], {"reason": "reason", "execute": "execute", "done": END})
+graph.add_conditional_edges(
+    "supervisor",
+    lambda s: s.get("next", "reason"),
+    {
+        "reason": "reason",
+        "generate": "generate",
+        "execute": "execute",
+        "report": "report",
+        "done": END
+    }
+)
 graph.add_edge("reason", "supervisor")
+graph.add_edge("generate", "supervisor")
 graph.add_edge("execute", "supervisor")
-graph.compile(checkpointer=MemorySaver())  # Memory
+graph.add_edge("report", "supervisor")
+
+# Compile with Checkpointer (Memory Persistence)
+checkpointer = MemorySaver()
+graph.compile(checkpointer=checkpointer)
 
 # Run Demo
 initial_state = {
-    "messages": ["User: Test this code"],
-    "code": "int add(int a, int b) { return a + b; }"  # Java example
+    "messages": ["DevAgent: Test this code"],
+    "code": "int add(int a, int b) { return a + b; }",  # Java example
+    "next": "reason"
 }
-result = graph.invoke(initial_state)
+config = {"configurable": {"thread_id": "test-thread-1"}}
+result = graph.invoke(initial_state, config=config)
 
 # Print Results
 print("Final Messages:")
 for msg in result["messages"]:
     print(msg)
-print(f"Language: {result['language']}, Results: {result['results']}")
+print(f"Final Report: {result['report']}")
