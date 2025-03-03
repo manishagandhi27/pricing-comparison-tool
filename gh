@@ -101,3 +101,15 @@ print("Final Messages:")
 for msg in result["messages"]:
     print(msg)
 print(f"Test Cases: {result['test_cases']}, Commit Status: {result['commit_status']}")
+
+
+
+*"Given the following code snippet, generate a comprehensive set of test cases using {testing_framework} in {programming_language}. Ensure test coverage for all possible scenarios, including edge cases, boundary conditions, typical use cases, and error handling.
+The test cases should include:
+Positive and negative test scenarios
+Input variations and expected outputs
+Assertions to validate correctness
+Edge case handling
+The test cases should be structured following best practices for {testing_framework}, including setup, execution, and teardown (if necessary). Use clear comments to explain each test case's purpose.
+Code Snippet:
+{code_snippet}*
