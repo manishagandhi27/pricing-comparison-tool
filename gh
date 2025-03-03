@@ -1,0 +1,91 @@
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+from langchain.tools import tool
+from langchain.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI  # Replace with your LLM
+
+# Mock Tools
+@tool
+def generate_tests(code, language):
+    if "java" in language.lower():
+        return ["assert add(2, 3) == 5", "assert add(0, 0) == 0"]
+    return ["expect(add(2, 3)).toBe(5)"]  # React/JS default
+
+@tool
+def run_tests(tests):
+    return ["passed" if "assert" in t or "expect" in t else "failed" for t in tests]
+
+# State Definition
+class State(dict):
+    messages: list    # Log reasoning
+    code: str        # Memory: Input code
+    language: str    # Memory: Detected language
+    tests: list      # Generated tests
+    results: list    # Test outcomes
+    next: str       # Workflow routing
+
+# LLM Setup (replace with your model/key)
+llm = ChatOpenAI(model="gpt-3.5-turbo", api_key="your-key-here")
+
+# Nodes
+def supervisor_node(state):
+    if "code" in state and not state.get("language"):
+        return Command(goto="reason")  # Analyze code
+    if state.get("tests") and not state.get("results"):
+        return Command(goto="execute")  # Run tests
+    if state.get("results"):
+        return Command(goto="done")    # Finish
+    return Command(goto="reason")
+
+def reason_node(state):
+    # CoT Prompt
+    prompt = ChatPromptTemplate.from_template(
+        "Input code: '{code}'\n"
+        "Think step-by-step:\n"
+        "1. Identify the programming language (e.g., Java, React/JS).\n"
+        "2. Understand what the code does.\n"
+        "3. Suggest test cases.\n"
+        "Output your reasoning, language, and test request."
+    )
+    response = llm.invoke(prompt.format(code=state["code"]))
+    reasoning = response.content
+    state["messages"].append(f"Reasoning: {reasoning}")
+    # Mock parsing (simplified)
+    language = "Java" if "int" in state["code"] else "React/JS"
+    state["language"] = language
+    state["messages"].append(f"Detected language: {language}. Generate tests.")
+    return Command(goto="execute")
+
+def execute_node(state):
+    # Generate and Run Tests
+    tests = generate_tests.invoke({"code": state["code"], "language": state["language"]})
+    state["tests"] = tests
+    results = run_tests.invoke(tests)
+    state["results"] = results
+    state["messages"].append(f"Tests: {tests}, Results: {results}")
+    return Command(goto="supervisor")
+
+# Build Graph
+graph = StateGraph(State)
+graph.add_node("supervisor", supervisor_node)
+graph.add_node("reason", reason_node)    # CoT
+graph.add_node("execute", execute_node)  # Tools
+graph.add_edge(START, "supervisor")
+graph.add_conditional_edges("supervisor", lambda s: s["next"], {"reason": "reason", "execute": "execute", "done": END})
+graph.add_edge("reason", "supervisor")
+graph.add_edge("execute", "supervisor")
+graph.compile(checkpointer=MemorySaver())  # Memory
+
+# Run Demo
+initial_state = {
+    "messages": ["User: Test this code"],
+    "code": "int add(int a, int b) { return a + b; }"  # Java example
+}
+result = graph.invoke(initial_state)
+
+# Print Results
+print("Final Messages:")
+for msg in result["messages"]:
+    print(msg)
+print(f"Language: {result['language']}, Results: {result['results']}")
