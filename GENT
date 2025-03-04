@@ -1,0 +1,128 @@
+from langgraph.graph import StateGraph, END, START
+from langgraph.types import Command
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, ToolMessage
+from typing import Literal
+import os
+
+# Initialize LLM with tools
+os.environ["OPENAI_API_KEY"] = "your-api-key"
+llm = ChatOpenAI(model="gpt-4o-mini")
+tools = [fetch_code_from_gitlab, commit_test_cases, review_test_cases]
+llm_with_tools = llm.bind_tools(tools)
+tool_map = {tool.name: tool for tool in tools}
+
+# Agent node: LLM decides fetch, generate, or commit
+def agent_node(state: TestCaseState) -> Command[Literal["supervisor"]]:
+    messages = state["messages"]
+    prompt = f"""
+    You are a Test Case Generation Agent. Your goal is to generate and commit test cases for:
+    - File: {state['file_location']}
+    - Repo: {state['repo_url']}
+    
+    Tools:
+    - fetch_code_from_gitlab(file_location, repo_url)
+    - commit_test_cases(test_cases, file_location, repo_url, commit_message)
+    - review_test_cases(test_cases, code_content) [don’t call this yourself; critic will]
+
+    Current state:
+    - Code: {state.get('code_content', 'Not fetched')}
+    - Tests: {state.get('test_cases', 'Not generated')}
+    - Critique: {state.get('critique', 'Not reviewed')}
+    - Commit: {state.get('commit_status', 'Not committed')}
+
+    Reason step-by-step:
+    1. If code isn’t fetched, fetch it with fetch_code_from_gitlab.
+    2. If code fetched but no tests, generate test cases for the code.
+    3. If tests generated and critiqued, check critique:
+       - If "good" in critique, commit with commit_test_cases.
+       - If "invalid" or issues noted, regenerate tests.
+    4. If committed, say "Done".
+
+    Call tools as needed.
+    """
+    response = llm_with_tools.invoke(messages + [HumanMessage(content=prompt)])
+    messages.append(response)
+
+    # Handle tool calls
+    if response.tool_calls:
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            args = tool_call["args"]
+            if tool_name == "review_test_cases":
+                continue  # Critic handles this
+            tool_result = tool_map[tool_name].invoke(args)
+            messages.append(ToolMessage(content=tool_result, tool_call_id=tool_call["id"]))
+            if tool_name == "fetch_code_from_gitlab":
+                state["code_content"] = tool_result
+            elif tool_name == "commit_test_cases":
+                state["commit_status"] = tool_result
+        return Command(update={"messages": messages}, goto="supervisor")
+    
+    # Generate tests if no tool call and code is fetched
+    if state["code_content"] and not state.get("test_cases") and "fetch" not in response.content.lower():
+        test_cases = response.content.strip()
+        messages.append(f"Generated tests:\n{test_cases}")
+        state["test_cases"] = test_cases
+    
+    return Command(update={"messages": messages}, goto="supervisor")
+
+# Critics node: Reviews test cases
+def critics_node(state: TestCaseState) -> Command[Literal["supervisor"]]:
+    if not state["test_cases"] or state["critique"]:
+        return Command(update={"messages": state["messages"] + ["No tests to critique yet."]}, goto="supervisor")
+    
+    prompt = f"""
+    You are a Test Case Critic Agent. Review these test cases against the code:
+    Code:
+    ```
+    {state['code_content']}
+    ```
+    Tests:
+    ```
+    {state['test_cases']}
+    ```
+    Use review_test_cases to evaluate. Append feedback to messages.
+    """
+    response = llm_with_tools.invoke([HumanMessage(content=prompt)])
+    messages = state["messages"] + [response]
+    
+    if response.tool_calls and response.tool_calls[0]["name"] == "review_test_cases":
+        tool_call = response.tool_calls[0]
+        critique = tool_map["review_test_cases"].invoke(tool_call["args"])
+        messages.append(ToolMessage(content=critique, tool_call_id=tool_call["id"]))
+    else:
+        critique = response.content.strip()
+        messages.append(f"Critique without tool: {critique}")
+    
+    return Command(update={"messages": messages, "critique": critique}, goto="supervisor")
+
+# Supervisor node: Controls flow and iteration
+def supervisor_node(state: TestCaseState) -> Command[Literal["agent", "critics", END]]:
+    messages = state["messages"]
+    if state.get("commit_status"):
+        return Command(update={"messages": messages + ["Process complete."]}, goto=END)
+    elif state.get("test_cases") and not state.get("critique"):
+        return Command(update={"messages": messages + ["Sending to critic..."]}, goto="critics")
+    elif state.get("critique") and "invalid" in state["critique"].lower():
+        return Command(update={"messages": messages + ["Tests invalid, regenerating."], "test_cases": None, "critique": None}, goto="agent")
+    return Command(update={"messages": messages + ["Continuing agent work..."]}, goto="agent")
+
+# Build the graph
+workflow = StateGraph(TestCaseState)
+workflow.add_node("agent", agent_node)
+workflow.add_node("critics", critics_node)
+workflow.add_node("supervisor", supervisor_node)
+workflow.add_edge(START, "supervisor")
+graph = workflow.compile()
+
+
+
+result = graph.invoke({
+    "file_location": "src/main.py",
+    "repo_url": "https://gitlab.com/myproject/myrepo",
+    "messages": []
+})
+for msg in result["messages"]:
+    print(str(msg))
+print(f"Final State: {result}")
