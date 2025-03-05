@@ -1,0 +1,181 @@
+critique_prompt = ChatPromptTemplate.from_template(
+    "State: {input}\n"
+    "You are a Test Case Critique Agent. Your job is to review test cases for completeness and quality.\n"
+    "Think step-by-step:\n"
+    "1. Analyze the test_cases and code_content.\n"
+    "2. Check for:\n"
+    "   - Positive cases (normal inputs).\n"
+    "   - Negative cases (invalid inputs, errors).\n"
+    "   - Edge cases (boundaries, extremes).\n"
+    "   - Syntax correctness for the language.\n"
+    "3. Provide feedback:\n"
+    "   - If incomplete, suggest specific improvements (e.g., 'Add negative case for x < 0').\n"
+    "   - If good, approve with 'Approved'.\n"
+    "4. Set status: 'needs_work' or 'approved'.\n"
+    "Output JSON with 'reasoning', 'feedback', and 'status'.\n"
+    "Example: {'reasoning': 'Missing edge cases', 'feedback': 'Add test for x = 0', 'status': 'needs_work'}"
+)
+
+
+testcase_prompt = ChatPromptTemplate.from_template(
+    "State: {input}\n"
+    "You are a Test Case Agent. Your job is to fetch code from GitLab, generate comprehensive test cases, and commit them.\n"
+    "Available tools: fetch_from_gitlab, critique_tests, commit_to_gitlab.\n"
+    "Think step-by-step:\n"
+    "1. Check the state (code_name, code_content, test_cases, critique_feedback).\n"
+    "2. If no code_content, fetch it from GitLab using 'fetch_from_gitlab'.\n"
+    "3. If code_content exists but no test_cases or critique_feedback suggests changes:\n"
+    "   - Identify the programming language (e.g., Python from 'def', Java from 'public').\n"
+    "   - Analyze what the code does.\n"
+    "   - Generate test cases: positive (normal inputs), negative (invalid inputs), edge cases (boundaries).\n"
+    "   - Incorporate critique_feedback if present (e.g., add missing cases).\n"
+    "   - Call 'critique_tests' to review.\n"
+    "4. If test_cases exist and critique_status is 'approved', commit using 'commit_to_gitlab'.\n"
+    "Output JSON with 'reasoning', 'action', and 'params' (if tool called). 'test_cases' field if generating.\n"
+    "Example output: {'reasoning': '...', 'action': 'CALL_TOOL: fetch_from_gitlab', 'params': {'code_name': '...'}}\n"
+    "or {'reasoning': '...', 'test_cases': ['assert x == 1', ...], 'action': 'CALL_TOOL: critique_tests'}"
+)
+
+from typing import List, Optional, Annotated
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.tools import tool
+from langchain.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI  # Mock for internal API
+from langchain.agents import create_react_agent
+import json
+import os
+import gitlab
+
+# State Definition
+class State(dict):
+    messages: List[str]
+    code_name: Optional[str]
+    code_content: Optional[str]
+    test_cases: Optional[List[str]]
+    commit_status: Optional[str]
+    critique_feedback: Optional[str]  # Feedback from Critique Agent
+    critique_status: Optional[str]   # "pending", "needs_work", "approved"
+    iteration_count: int             # Track loop iterations
+
+# Tools
+@tool
+def fetch_from_gitlab(code_name: str) -> str:
+    """Fetch code from GitLab."""
+    try:
+        gl = gitlab.Gitlab("https://gitlab.com", private_token=os.getenv("GITLAB_TOKEN"))
+        project = gl.projects.get(code_name.split('/')[0])
+        file = project.files.get(file_path="src/main.py", ref=code_name.split('/')[1])
+        return file.decode().decode('utf-8')
+    except Exception as e:
+        return f"Error fetching code: {str(e)}"
+
+@tool
+def commit_to_gitlab(code_name: str, test_cases: List[str]) -> str:
+    """Commit test cases to GitLab."""
+    try:
+        gl = gitlab.Gitlab("https://gitlab.com", private_token=os.getenv("GITLAB_TOKEN"))
+        project = gl.projects.get(code_name.split('/')[0])
+        branch = f"test-cases-{code_name.split('/')[1]}-{int(time.time())}"
+        project.branches.create({"branch": branch, "ref": code_name.split('/')[1]})
+        project.files.create({
+            "file_path": "tests/test_main.py",
+            "branch": branch,
+            "content": "\n".join(test_cases),
+            "commit_message": "Add generated test cases"
+        })
+        return f"Committed to {branch}"
+    except Exception as e:
+        return f"Error committing: {str(e)}"
+
+@tool
+def critique_tests(state_json: str) -> str:
+    """Trigger Critique Agent (updated in state)."""
+    return "Triggering critique"  # Placeholder, actual logic in critique_agent
+
+# Internal API Mock (Replace with Your Endpoint)
+def call_internal_llm(prompt: str) -> str:
+    url = "http://internal-company-api/llm"
+    payload = {"prompt": prompt}
+    try:
+        response = requests.post(url, json=payload)
+        return response.text  # Must return JSON
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+llm = ChatOpenAI(model="gpt-3.5-turbo", api_key="mock-key")  # Mock adapter
+
+# Prompts (Defined Later)
+testcase_prompt = ChatPromptTemplate.from_template(...)  # Step 3
+critique_prompt = ChatPromptTemplate.from_template(...)  # Step 3
+
+# Agent Nodes
+def testcase_agent_node(state: State) -> State:
+    """Test Case Agent: Fetch, generate, commit."""
+    tools = [fetch_from_gitlab, commit_to_gitlab, critique_tests]
+    agent = create_react_agent(llm, tools, testcase_prompt)
+    response = agent.invoke({"input": json.dumps(state)})
+    llm_output = json.loads(response["output"])
+    state["messages"].append(f"TestCaseAgent: {llm_output['reasoning']}")
+
+    action = llm_output.get("action", "")
+    if action.startswith("CALL_TOOL:"):
+        tool_name = action.split("CALL_TOOL:")[1].strip()
+        params = llm_output.get("params", {})
+        if tool_name == "fetch_from_gitlab":
+            state["code_content"] = fetch_from_gitlab.invoke(params)
+            state["messages"].append(f"TestCaseAgent: Fetched code: {state['code_content']}")
+        elif tool_name == "commit_to_gitlab":
+            state["commit_status"] = commit_to_gitlab.invoke(params)
+            state["messages"].append(f"TestCaseAgent: {state['commit_status']}")
+            state["next"] = "END"
+        elif tool_name == "critique_tests":
+            state["next"] = "critique_agent"  # Trigger critique
+    return state
+
+def critique_agent_node(state: State) -> State:
+    """Critique Agent: Review test cases."""
+    tools = []  # Critique uses reasoning, no tools needed yet
+    agent = create_react_agent(llm, tools, critique_prompt)
+    response = agent.invoke({"input": json.dumps(state)})
+    llm_output = json.loads(response["output"])
+    state["messages"].append(f"CritiqueAgent: {llm_output['reasoning']}")
+    state["critique_feedback"] = llm_output.get("feedback", "")
+    state["critique_status"] = llm_output.get("status", "needs_work")
+    state["iteration_count"] += 1
+    state["next"] = "testcase_agent" if state["iteration_count"] < 3 and state["critique_status"] != "approved" else "END"
+    return state
+
+# Build Graph
+graph = StateGraph(State)
+graph.add_node("testcase_agent", testcase_agent_node)
+graph.add_node("critique_agent", critique_agent_node)
+graph.add_edge(START, "testcase_agent")
+graph.add_conditional_edges(
+    "testcase_agent",
+    lambda s: s.get("next", "critique_agent"),
+    {"critique_agent": "critique_agent", "END": END}
+)
+graph.add_conditional_edges(
+    "critique_agent",
+    lambda s: s.get("next", "testcase_agent"),
+    {"testcase_agent": "testcase_agent", "END": END}
+)
+checkpointer = MemorySaver()
+graph.compile(checkpointer=checkpointer)
+
+# Run Demo
+initial_state = {
+    "messages": ["Controller: Generate test cases for myproject/feature-xyz"],
+    "code_name": "myproject/feature-xyz",
+    "iteration_count": 0,
+    "critique_status": "pending"
+}
+config = {"configurable": {"thread_id": "test-case-thread-1"}}
+result = graph.invoke(initial_state, config=config)
+
+# Print Results
+print("Final Messages:")
+for msg in result["messages"]:
+    print(msg)
+print(f"Commit Status: {result['commit_status']}")
