@@ -267,9 +267,9 @@ critique_agent = create_react_agent(
 # Define nodes
 def testcase_node(state: AgentState) -> Command[Literal["critique", "testcase", END]]:
     formatted_prompt = testcase_prompt_template.format(
-        testcase=state["testcase"] or "None",
-        feedback=state["feedback"] or "None",
-        code_context=state["code_context"] or "None",
+        testcase=state.get("testcase", "None"),
+        feedback=state.get("feedback", "None"),
+        code_context=state.get("code_context", "None"),
         messages=str(state["messages"])
     )
     response = testcase_agent.invoke({"prompt": formatted_prompt})
@@ -299,8 +299,8 @@ def testcase_node(state: AgentState) -> Command[Literal["critique", "testcase", 
 
 def critique_node(state: AgentState) -> Command[Literal["testcase"]]:
     formatted_prompt = critique_prompt_template.format(
-        testcase=state["testcase"] or "None",
-        code_context=state["code_context"] or "None",
+        testcase=state.get("testcase", "None"),
+        code_context=state.get("code_context", "None"),
         messages=str(state["messages"])
     )
     response = critique_agent.invoke({"prompt": formatted_prompt})
@@ -333,7 +333,7 @@ workflow.add_node("critique", critique_node)
 workflow.set_entry_point("testcase")
 app = workflow.compile()
 
-# Run the workflow
+# Run the workflow with fully initialized state
 initial_state = {"messages": [], "testcase": None, "feedback": None, "code_context": None}
 result = app.invoke(initial_state)
 print("Final state:", result)
