@@ -1,109 +1,92 @@
-from langgraph.graph import StateGraph, END, START
-from langgraph.types import Command
-from langgraph.prebuilt import create_react_agent
-from typing import Literal
+from typing import TypedDict, Optional
 
-# Custom LLM (mocked as a placeholder since I don’t have your model)
-class CustomLLM:
-    def invoke(self, messages):
-        # Simulate your custom LLM response (replace with your actual implementation)
-        from langchain_core.messages import AIMessage
-        last_msg = messages[-1].content
-        if "fetch_code_from_gitlab" in last_msg:
-            return AIMessage(content='[fetch_code_from_gitlab(file_location="src/main.py", repo_url="mock/repo")]')
-        elif "generate test cases" in last_msg.lower():
-            return AIMessage(content="import pytest\ndef test_multiply():\n    assert multiply(2, 3) == 6")
-        elif "commit_test_cases" in last_msg:
-            return AIMessage(content='[commit_test_cases(test_cases="import pytest...", file_location="src/test_main.py", repo_url="mock/repo", commit_message="Add tests")]')
-        elif "review_test_cases" in last_msg:
-            return AIMessage(content='[review_test_cases(test_cases="import pytest...", code_content="# Mock code...")]')
-        return AIMessage(content="Done")
+class AgentState(TypedDict):
+    testcase: Optional[str]  # The generated test case
+    feedback: Optional[str]  # Feedback from Critique Agent
+    code_context: Optional[str]  # Code fetched from GitLab
 
-model = CustomLLM()
-tools = [fetch_code_from_gitlab, commit_test_cases, review_test_cases]
+You are a Testcase Agent. Your job is to generate test cases for code and respond to feedback. You have access to tools:
+- fetch_code_from_gitlab: Fetches code context from GitLab.
+- commit_to_gitlab: Commits the test case to GitLab.
+- goto: Transfers control to another node (e.g., "critique" or "testcase").
 
-# Agent node: LLM orchestrates fetch, generate, commit
-def agent_node(state: TestCaseState) -> Command[Literal["supervisor"]]:
-    prompt = f"""
-    You are a Test Case Generation Agent. Generate and commit test cases for:
-    - File: {state['file_location']}
-    - Repo: {state['repo_url']}
-    
-    Tools: fetch_code_from_gitlab, commit_test_cases, review_test_cases (critic uses this).
-    
-    State:
-    - Code: {state.get('code_content', 'Not fetched')}
-    - Tests: {state.get('test_cases', 'Not generated')}
-    - Critique: {state.get('critique', 'Not reviewed')}
-    - Commit: {state.get('commit_status', 'Not committed')}
+Here’s the current state:
+- Test case: {state['testcase']}
+- Feedback: {state['feedback']}
+- Code context: {state['code_context']}
 
-    Reason step-by-step:
-    1. Fetch code if not present.
-    2. Generate tests if code fetched but no tests.
-    3. If tests critiqued and good, commit them.
-    4. If committed, say "Done".
-    Use [tool_name(arg1=value1, ...)] syntax for tool calls.
-    """
-    agent = create_react_agent(model, tools=[fetch_code_from_gitlab, commit_test_cases], prompt=prompt)
-    messages = state["messages"]
-    response = agent.invoke({"messages": messages})
-    messages = response["messages"]
+Your task:
+1. If there’s no code context, fetch it using fetch_code_from_gitlab.
+2. If there’s no test case or feedback suggests improvements, generate a new test case based on the code context and feedback.
+3. If feedback says the test case is good, commit it to GitLab using commit_to_gitlab.
+4. Use goto to transfer control:
+   - To "critique" if you’ve generated a test case and need feedback.
+   - To "testcase" if you need to regenerate based on feedback.
 
-    # Update state based on tool calls or response
-    last_msg = messages[-1].content
-    if "fetch_code_from_gitlab" in last_msg:
-        state["code_content"] = fetch_code_from_gitlab.invoke({"file_location": state["file_location"], "repo_url": state["repo_url"]})
-    elif "commit_test_cases" in last_msg and state["test_cases"]:
-        state["commit_status"] = commit_test_cases.invoke({
-            "test_cases": state["test_cases"],
-            "file_location": "src/test_main.py",
-            "repo_url": state["repo_url"],
-            "commit_message": "Add tests"
-        })
-    elif state["code_content"] and not state.get("test_cases") and "fetch" not in last_msg.lower():
-        state["test_cases"] = last_msg  # Assume LLM generated tests
+Reason step-by-step and decide what to do. Only invoke tools when necessary.
 
-    return Command(update={"messages": messages}, goto="supervisor")
 
-# Critics node: Reviews test cases
-def critics_node(state: TestCaseState) -> Command[Literal["supervisor"]]:
-    if not state["test_cases"]:
-        return Command(update={"messages": state["messages"] + [HumanMessage("No tests to critique.")]}, goto="supervisor")
-    
-    prompt = f"""
-    You are a Test Case Critic. Review these test cases against the code:
-    Code: {state['code_content']}
-    Tests: {state['test_cases']}
-    Use review_test_cases tool with [review_test_cases(test_cases="{state['test_cases']}", code_content="{state['code_content']}")] syntax.
-    """
-    critic = create_react_agent(model, tools=[review_test_cases], prompt=prompt)
-    messages = state["messages"]
-    response = critic.invoke({"messages": messages})
-    messages = response["messages"]
-    
-    last_msg = messages[-1].content
-    if "review_test_cases" in last_msg:
-        critique = review_test_cases.invoke({"test_cases": state["test_cases"], "code_content": state["code_content"]})
-        messages.append(HumanMessage(content=f"Critique: {critique}"))
-        state["critique"] = critique
-    
-    return Command(update={"messages": messages, "critique": state.get("critique")}, goto="supervisor")
 
-# Supervisor node: Controls flow
-def supervisor_node(state: TestCaseState) -> Command[Literal["agent", "critics", END]]:
-    messages = state["messages"]
-    if state.get("commit_status"):
-        return Command(update={"messages": messages + [HumanMessage("Done.")]}, goto=END)
-    elif state.get("test_cases") and not state.get("critique"):
-        return Command(update={"messages": messages + [HumanMessage("To critic...")]}, goto="critics")
-    elif state.get("critique") and "invalid" in state["critique"].lower():
-        return Command(update={"messages": messages + [HumanMessage("Regenerating tests.")], "test_cases": None, "critique": None}, goto="agent")
-    return Command(update={"messages": messages + [HumanMessage("Agent working...")]}, goto="agent")
+from langchain.agents import create_react_agent
 
-# Build the graph
-workflow = StateGraph(TestCaseState)
-workflow.add_node("agent", agent_node)
-workflow.add_node("critics", critics_node)
-workflow.add_node("supervisor", supervisor_node)
-workflow.add_edge(START, "supervisor")
-graph = workflow.compile()
+testcase_tools = [fetch_code_from_gitlab, commit_to_gitlab, goto]
+testcase_agent = create_react_agent(
+    model=your_llm_model,
+    tools=testcase_tools,
+    prompt=testcase_prompt
+)
+
+def testcase_node(state: AgentState) -> AgentState:
+    response = testcase_agent.invoke({"input": state})
+    # Update state with the agent's output (e.g., testcase or tool invocation results)
+    if "testcase" in response:
+        state["testcase"] = response["testcase"]
+    return state
+
+
+
+You are a Critique Agent. Your job is to review test cases and provide feedback. You have access to tools:
+- goto: Transfers control to another node (e.g., "testcase").
+
+Here’s the current state:
+- Test case: {state['testcase']}
+- Code context: {state['code_context']}
+
+Your task:
+1. Review the test case against the code context.
+2. Generate feedback (e.g., "Looks good" or "Missing edge case X").
+3. Use goto to transfer control back to "testcase".
+
+Reason step-by-step and provide clear feedback. Only invoke goto when done.
+
+
+
+
+critique_tools = [goto]
+critique_agent = create_react_agent(
+    model=your_llm_model,
+    tools=critique_tools,
+    prompt=critique_prompt
+)
+
+def critique_node(state: AgentState) -> AgentState:
+    response = critique_agent.invoke({"input": state})
+    # Update state with feedback
+    if "feedback" in response:
+        state["feedback"] = response["feedback"]
+    return state
+
+
+
+
+from langgraph.graph import StateGraph
+
+workflow = StateGraph(AgentState)
+workflow.add_node("testcase", testcase_node)
+workflow.add_node("critique", critique_node)
+
+# Set entry point
+workflow.set_entry_point("testcase")
+
+# Compile the graph
+app = workflow.compile()
