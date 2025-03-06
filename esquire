@@ -1,0 +1,91 @@
+from elasticsearch import Elasticsearch
+
+es = Elasticsearch("http://localhost:9200")
+query_text = "Python programming"
+query_vector = your_embedding_model.encode(query_text).tolist()
+
+try:
+    response = es.search(
+        index="my-index",
+        body={
+            "retriever": {
+                "text_similarity_reranker": {
+                    "retriever": {
+                        "rrf": {
+                            "retrievers": [
+                                # BM25 Search (standard retriever)
+                                {
+                                    "standard": {
+                                        "query": {
+                                            "bool": {
+                                                "must": {
+                                                    "match": {
+                                                        "content": query_text
+                                                    }
+                                                },
+                                                "filter": [
+                                                    {
+                                                        "terms": {
+                                                            "tags": ["python", "programming"]
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    }
+                                },
+                                # Dense Vector Search (knn retriever)
+                                {
+                                    "knn": {
+                                        "field": "dense_embeddings",
+                                        "query_vector": query_vector,
+                                        "k": 10,
+                                        "num_candidates": 50,
+                                        "filter": {
+                                            "terms": {
+                                                "tags": ["python", "programming"]
+                                            }
+                                        }
+                                    }
+                                },
+                                # Sparse Vector Search (standard retriever with sparse_vector)
+                                {
+                                    "standard": {
+                                        "query": {
+                                            "bool": {
+                                                "must": {
+                                                    "sparse_vector": {
+                                                        "field": "sparse_tokens",
+                                                        "inference_id": "my-elser-model",
+                                                        "query": query_text
+                                                    }
+                                                },
+                                                "filter": [
+                                                    {
+                                                        "terms": {
+                                                            "tags": ["python", "programming"]
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    }
+                                }
+                            ],
+                            "rank_constant": 60,
+                            "window_size": 100
+                        }
+                    },
+                    "field": "content",
+                    "inference_id": "my-reranker-deploy",
+                    "inference_text": query_text,
+                    "max_score": 0.6
+                }
+            },
+            "size": 5
+        }
+    )
+    for hit in response["hits"]["hits"]:
+        print(f"ID: {hit['_id']}, Score: {hit['_score']}, Content: {hit['_source']['content']}")
+except Exception as e:
+    print(f"Error: {e}")
