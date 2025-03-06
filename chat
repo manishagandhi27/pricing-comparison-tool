@@ -1,24 +1,22 @@
 import logging
-import re
-import json
-from typing import Optional, Literal, List
+from typing import TypedDict, Optional, Literal, Annotated
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain.agents import create_react_agent
 from langgraph.graph import StateGraph, Command, END, MessagesState
 from langchain.prompts import PromptTemplate
+from typing import List
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Define the state using MessagesState as the base
+# Define the state
 class AgentState(MessagesState):
-    testcase: Optional[str]       # The generated test case
-    feedback: Optional[str]       # Feedback from Critique Agent
-    code_context: Optional[str]   # Code fetched from GitLab
-    messages: List               # Conversation history
+    testcase: Optional[str]
+    feedback: Optional[str]
+    code_context: Optional[str]
 
-# Mock tools (replace with actual implementations)
+# Mock tools
 def fetch_code_from_gitlab():
     logger.info("Invoking fetch_code_from_gitlab tool")
     return {"code_context": "def add(a, b): return a + b"}
@@ -28,13 +26,11 @@ def commit_to_gitlab(test_cases: str):
     print(f"Committing to GitLab:\n{test_cases}")
     return {}
 
-# Define the Testcase Agent prompt template with JSON output and tool calls
+# Fine-tuned Testcase Agent prompt with clear, explicit instructions
 testcase_prompt_template = PromptTemplate(
     input_variables=["testcase", "feedback", "code_context", "messages"],
     template="""
-You are a Testcase Agent, an expert in generating high-quality, syntactically correct test cases for code in any programming language. Your job is to analyze code context, generate diverse test cases, incorporate feedback, and prepare them for committing to GitLab. You have access to tools:
-- fetch_code_from_gitlab: Fetches code context and updates the state with it.
-- commit_to_gitlab: Commits the test cases provided as a single string argument to GitLab.
+You are a Testcase Agent responsible for generating and committing test cases.
 
 Current state:
 - Test case: {testcase}
@@ -42,56 +38,52 @@ Current state:
 - Code context: {code_context}
 - Messages: {messages}
 
-Instructions:
-1. **Analyze Code Context**: If code_context is null or empty, invoke fetch_code_from_gitlab to retrieve it by including it in the "tools" field. Identify the programming language (e.g., Python, Java, C++, JavaScript) by examining syntax, keywords, or patterns.
+Available tools:
+- fetch_code_from_gitlab: Use to fetch code context if missing.
+- commit_to_gitlab: Use to commit test cases when feedback is "Looks good".
 
-2. **Generate Diverse Test Cases**: 
-   - If testcase is null or feedback isn’t exactly "Looks good", generate a wide range of test cases (positive, negative, edge cases, error conditions) for the code context, tailored to the detected language’s testing framework (e.g., pytest for Python, JUnit for Java).
-   - If feedback exists and isn’t "Looks good" (e.g., "Missing edge case X"), incorporate it by adjusting or adding test cases, preserving valid tests unless contradicted.
-   - Ensure test cases are syntactically correct.
+Instructions (follow these exactly):
+1. If code_context is "None" or empty:
+   - Set "tool" to "fetch_code_from_gitlab".
+   - Set "goto" to "critique".
+   - Keep testcase as "None".
+   - Add message "Fetching code context".
+2. If feedback is exactly "Looks good" (case-sensitive, no extra spaces):
+   - Set "tool" to "commit_to_gitlab" with the current testcase as the argument.
+   - Set "goto" to "END".
+   - Keep testcase unchanged.
+   - Add message "Feedback is 'Looks good', committing test cases".
+3. If testcase is "None" or feedback is not "Looks good":
+   - Generate new test cases based on code_context (e.g., for Python, use pytest format).
+   - Set "tool" to "" (no tool).
+   - Set "goto" to "critique".
+   - Add message "Generated test cases" or "Regenerated test cases based on feedback: {feedback}".
 
-3. **Format Test Cases for Commit**:
-   - If feedback is exactly "Looks good", format the test cases into a single, well-structured string (e.g., a valid .py file for Python) with necessary imports and syntax, then invoke commit_to_gitlab with this string by including it in the "tools" field.
+Output Structure:
+- Produce a string with these exact markers:
+  - `TOOL:<tool_name>:<args_or_none>`
+  - `TESTCASE:<test_cases_or_None>`
+  - `MESSAGE:<your_message>`
+  - `GOTO:<critique_or_END>`
+- Examples:
+  - Fetching: `TOOL:fetch_code_from_gitlab:none\nTESTCASE:None\nMESSAGE:Fetching code context\nGOTO:critique`
+  - Committing: `TOOL:commit_to_gitlab:<testcase>\nTESTCASE:<testcase>\nMESSAGE:Feedback is 'Looks good', committing test cases\nGOTO:END`
+  - Generating: `TOOL::\nTESTCASE:import pytest\ndef test_add(): assert add(2, 3) == 5\nMESSAGE:Generated test cases\nGOTO:critique`
 
-4. **Decide Next Step**:
-   - After generating test cases (if feedback isn’t "Looks good"), set "goto" to "critique".
-   - If feedback is "Looks good", invoke commit_to_gitlab and set "goto" to "END".
-   - Prevent infinite loops by regenerating only when feedback explicitly suggests changes.
+Rules:
+- Always produce a response, even if it’s a fallback (e.g., "No action" message).
+- If feedback is "Looks good", you MUST invoke "commit_to_gitlab" and set "goto" to "END".
+- Keep instructions simple and explicit.
 
-5. **Output Structure**:
-   - Produce a JSON object in your response with this exact structure:
-     ```json
-     {
-       "updates": {
-         "testcase": "<formatted_test_cases_or_null_if_unchanged>",
-         "feedback": "<current_feedback_or_null>",
-         "code_context": "<new_code_context_or_null_if_unchanged>",
-         "messages": ["<your_reasoning_and_action>"]
-       },
-       "tools": [{"tool": "<tool_name>", "args": "<tool_arguments_or_null>"}],
-       "goto": "<critique_or_END>"
-     }
-     ```
-   - Use null for unchanged fields or if no tool is invoked.
-   - Examples:
-     - Fetching: `{"updates": {"testcase": null, "feedback": null, "code_context": null, "messages": ["No code context, fetching from GitLab"]}, "tools": [{"tool": "fetch_code_from_gitlab", "args": null}], "goto": "critique"}`
-     - Generating: `{"updates": {"testcase": "import pytest\ndef test_add_positive(): assert add(2, 3) == 5", "feedback": null, "code_context": null, "messages": ["Generated initial test cases"]}, "tools": [], "goto": "critique"}`
-     - Committing: `{"updates": {"testcase": "<formatted_test_file>", "feedback": "Looks good", "code_context": null, "messages": ["Committed test cases"]}, "tools": [{"tool": "commit_to_gitlab", "args": "<formatted_test_file>"}], "goto": "END"}`
-     
-Reasoning Guidelines:
-- Reason clearly: identify language, assess state, generate or commit, and choose next step.
-- Include tool calls in "tools" when needed.
-- Strictly follow the JSON structure—no exceptions.
-
-Begin reasoning now and output your response as a single AIMessage with the JSON structure inside ```json``` tags.
+Reason now and output your response with the marker structure.
 """
 )
 
-# Define the Critique Agent prompt template with JSON output (no tools)
+# Simplified Critique Agent prompt (for testing)
 critique_prompt_template = PromptTemplate(
     input_variables=["testcase", "code_context", "messages"],
     template="""
-You are a Critique Agent, an expert in reviewing test cases for code in any programming language. Your sole job is to evaluate test cases against the provided code context, provide precise feedback, and return control to the Testcase Agent. You have no tools.
+You are a Critique Agent. Your job is to provide feedback on test cases.
 
 Current state:
 - Test case: {testcase}
@@ -99,50 +91,58 @@ Current state:
 - Messages: {messages}
 
 Instructions:
-1. **Analyze Code Context**: Identify the programming language (e.g., Python, Java, C++, JavaScript) from the code_context by its syntax or keywords.
+- Set feedback to "Looks good" (exact text) for testing.
+- Set goto to "testcase".
+- Add message "Forced 'Looks good' for testing".
 
-2. **Evaluate Test Cases**:
-   - Check syntax for the detected language and testing framework (e.g., pytest for Python).
-   - Verify coverage: positive, negative, edge cases, and error conditions.
-   - Assess correctness: ensure tests match the code’s behavior.
-   - Identify issues: missing scenarios, syntax errors, or logical flaws.
+Output Structure:
+- Use these markers:
+  - `FEEDBACK:<feedback>`
+  - `MESSAGE:<message>`
+  - `GOTO:testcase`
 
-3. **Provide Feedback**:
-   - If testcase is null, set feedback to "No test cases provided".
-   - If test cases are correct, complete, and cover all scenarios, set feedback to "Looks good".
-   - Otherwise, set feedback to a specific critique (e.g., "Missing edge case for null input").
-
-4. **Next Step**:
-   - Always set "goto" to "testcase".
-
-5. **Output Structure**:
-   - Produce a JSON object in your response with this exact structure:
-     ```json
-     {
-       "updates": {
-         "testcase": "<current_testcase_or_null>",
-         "feedback": "<your_feedback>",
-         "code_context": "<current_code_context_or_null>",
-         "messages": ["<your_reasoning>"]
-       },
-       "tools": [],
-       "goto": "testcase"
-     }
-     ```
-   - Use null for unchanged fields.
-
-Reasoning Guidelines:
-- Reason step-by-step: detect language, evaluate syntax, coverage, and correctness.
-- Be thorough and specific in feedback.
-- Strictly follow the JSON structure—no exceptions.
-
-Begin reasoning now and output your response as a single AIMessage with the JSON structure inside ```json``` tags.
+Output now:
+FEEDBACK:Looks good
+MESSAGE:Forced 'Looks good' for testing
+GOTO:testcase
 """
 )
 
-your_llm_model = customGeminimodel()  # private LLM model instance
+# Mock LLM (simplified for testing)
+class MockLLM:
+    def invoke(self, input_dict):
+        logger.info("Invoking LLM with prompt: %s", input_dict["prompt"])
+        prompt = input_dict["prompt"]
+        
+        testcase = "Test case: None" in prompt and "None" or prompt.split("Test case:")[1].split("Feedback:")[0].strip()
+        feedback = "Feedback: " in prompt and prompt.split("Feedback:")[1].split("Code context:")[0].strip() or "None"
+        code_context = "Code context: " in prompt and prompt.split("Code context:")[1].split("Messages:")[0].strip() or "None"
+        
+        if "Testcase Agent" in prompt:
+            logger.info("Testcase Agent state - testcase: %s, feedback: %s, code_context: %s", testcase, feedback, code_context)
+            if code_context == "None":
+                content = "TOOL:fetch_code_from_gitlab:none\nTESTCASE:None\nMESSAGE:Fetching code context\nGOTO:critique"
+            elif feedback == "Looks good":
+                content = f"TOOL:commit_to_gitlab:{testcase}\nTESTCASE:{testcase}\nMESSAGE:Feedback is 'Looks good', committing test cases\nGOTO:END"
+            elif testcase == "None":
+                content = "TOOL::\nTESTCASE:import pytest\\ndef test_add(): assert add(2, 3) == 5\nMESSAGE:Generated test cases\nGOTO:critique"
+            else:
+                content = f"TOOL::\nTESTCASE:import pytest\\ndef test_add_positive(): assert add(2, 3) == 5\\ndef test_add_negative(): assert add(-1, -1) == -2\nMESSAGE:Regenerated test cases based on feedback: {feedback}\nGOTO:critique"
+            logger.info("Testcase Agent response: %s", content)
+            return [AIMessage(content=content)]
+        
+        elif "Critique Agent" in prompt:
+            content = "FEEDBACK:Looks good\nMESSAGE:Forced 'Looks good' for testing\nGOTO:testcase"
+            logger.info("Critique Agent response: %s", content)
+            return [AIMessage(content=content)]
+        
+        content = "TOOL::\nTESTCASE:None\nMESSAGE:No action\nGOTO:critique"
+        logger.info("Default LLM response: %s", content)
+        return [AIMessage(content=content)]
 
-# Create agents with pre-formatted prompt templates
+your_llm_model = MockLLM()  # Replace with your real LLM
+
+# Create agents
 testcase_agent = create_react_agent(
     model=your_llm_model,
     tools=[fetch_code_from_gitlab, commit_to_gitlab],
@@ -155,38 +155,16 @@ critique_agent = create_react_agent(
     prompt=critique_prompt_template
 )
 
-# Helper function to extract JSON from LLM message content using regex
-def extract_json_from_content(content: str) -> dict:
-    pattern = r'```json\s*(\{.*?\})\s*```'
-    match = re.search(pattern, content, re.DOTALL)
-    if match:
-        json_str = match.group(1)
-        try:
-            data = json.loads(json_str)
-            return data
-        except json.JSONDecodeError as e:
-            logger.error("JSON decoding error: %s", e)
-    logger.error("Failed to extract JSON from message content: %s", content)
-    # Return a safe fallback command to avoid infinite loops
-    return {
-        "updates": {"testcase": None, "feedback": None, "code_context": None, "messages": ["Error in response parsing"]},
-        "tools": [],
-        "goto": "testcase"
-    }
-
-# Define the Testcase node
+# Define nodes
 def testcase_node(state: AgentState) -> Command[Literal["critique", "testcase", END]]:
     logger.info("Entering testcase_node with state: %s", state)
-    # Create a structured transcript from the conversation history
-    conversation_history = "\n".join([str(msg) for msg in state.get("messages", [])])
-    
     formatted_prompt = testcase_prompt_template.format(
-        testcase=state.get("testcase") if state.get("testcase") is not None else "null",
-        feedback=state.get("feedback") if state.get("feedback") is not None else "null",
-        code_context=state.get("code_context") if state.get("code_context") is not None else "null",
-        messages=conversation_history
+        testcase=state.get("testcase", "None"),
+        feedback=state.get("feedback", "None"),
+        code_context=state.get("code_context", "None"),
+        messages=str(state["messages"])
     )
-    logger.info("Formatted prompt for Testcase Agent: %s", formatted_prompt[:200])
+    logger.info("Formatted prompt for Testcase Agent: %s", formatted_prompt)
     
     response = testcase_agent.invoke({"prompt": formatted_prompt})
     logger.info("Raw response from Testcase Agent: %s", response)
@@ -195,51 +173,59 @@ def testcase_node(state: AgentState) -> Command[Literal["critique", "testcase", 
     logger.info("Extracted AIMessage content: %s", content)
     
     if not content.strip():
-        logger.warning("Empty content received from Testcase Agent")
+        logger.warning("Empty content from Testcase Agent")
+        content = f"TOOL::\nTESTCASE:None\nMESSAGE:Empty response fallback, feedback was '{state.get('feedback', 'None')}'\nGOTO:critique"
+        logger.info("Using fallback content: %s", content)
     
-    data = extract_json_from_content(content)
-    logger.info("Parsed JSON data: %s", data)
+    # Extract fields
+    updates = {"messages": state["messages"]}
+    lines = content.split("\n")
+    tool_name = ""
+    tool_args = "none"
+    testcase = "None"
+    message = "No message"
+    goto = "critique"
     
-    # Process tool invocations as indicated by the LLM
-    for tool_call in data.get("tools", []):
-        logger.info("Processing tool call: %s", tool_call)
-        if tool_call.get("tool") == "fetch_code_from_gitlab":
-            result = fetch_code_from_gitlab()
-            data["updates"]["code_context"] = result.get("code_context")
-        elif tool_call.get("tool") == "commit_to_gitlab" and tool_call.get("args"):
-            commit_to_gitlab(tool_call["args"])
+    for line in lines:
+        if line.startswith("TOOL:"):
+            parts = line.split(":", 2)
+            tool_name = parts[1]
+            tool_args = parts[2] if len(parts) > 2 else "none"
+        elif line.startswith("TESTCASE:"):
+            testcase = line.split("TESTCASE:")[1].strip()
+        elif line.startswith("MESSAGE:"):
+            message = line.split("MESSAGE:")[1].strip()
+        elif line.startswith("GOTO:"):
+            goto = line.split("GOTO:")[1].strip()
     
-    # Update the conversation history with LLM reasoning messages
-    new_messages = state.get("messages", [])
-    for msg in data["updates"].get("messages", []):
-        new_messages.append(AIMessage(content=msg))
+    updates["messages"].append(AIMessage(content=message))
+    if testcase != "None":
+        updates["testcase"] = testcase
     
-    # Merge updates from LLM without overriding unchanged fields
-    if data["updates"].get("testcase") is not None:
-        state["testcase"] = data["updates"]["testcase"]
-    if data["updates"].get("feedback") is not None:
-        state["feedback"] = data["updates"]["feedback"]
-    if data["updates"].get("code_context") is not None:
-        state["code_context"] = data["updates"]["code_context"]
-    state["messages"] = new_messages
+    # Handle tool invocations
+    if tool_name == "fetch_code_from_gitlab":
+        result = fetch_code_from_gitlab()
+        updates["code_context"] = result["code_context"]
+    elif tool_name == "commit_to_gitlab" and tool_args != "none":
+        commit_to_gitlab(tool_args)
     
-    logger.info("Returning Command from testcase_node - state: %s, goto: %s", state, data.get("goto"))
+    logger.info("Returning Command from testcase_node - updates: %s, goto: %s", updates, goto)
     return Command(
-        update=state,
-        goto=data.get("goto")
+        update=updates,
+        goto=goto
     )
 
-# Define the Critique node
 def critique_node(state: AgentState) -> Command[Literal["testcase"]]:
     logger.info("Entering critique_node with state: %s", state)
-    conversation_history = "\n".join([str(msg) for msg in state.get("messages", [])])
+    state["feedback"] = "Looks good"  # Force feedback for testing
+    logger.info("Forcefully set feedback to 'Looks good'")
     
     formatted_prompt = critique_prompt_template.format(
-        testcase=state.get("testcase") if state.get("testcase") is not None else "null",
-        code_context=state.get("code_context") if state.get("code_context") is not None else "null",
-        messages=conversation_history
+        testcase=state.get("testcase", "None"),
+        code_context=state.get("code_context", "None"),
+        messages=str(state["messages"])
     )
-    logger.info("Formatted prompt for Critique Agent: %s", formatted_prompt[:200])
+    logger.info("Formatted prompt for Critique Agent: %s", formatted_prompt)
     
     response = critique_agent.invoke({"prompt": formatted_prompt})
     logger.info("Raw response from Critique Agent: %s", response)
@@ -248,33 +234,36 @@ def critique_node(state: AgentState) -> Command[Literal["testcase"]]:
     logger.info("Extracted AIMessage content: %s", content)
     
     if not content.strip():
-        logger.warning("Empty content received from Critique Agent")
+        logger.warning("Empty content from Critique Agent")
+        content = "FEEDBACK:Looks good\nMESSAGE:Forced 'Looks good' due to empty response\nGOTO:testcase"
+        logger.info("Using fallback content: %s", content)
     
-    data = extract_json_from_content(content)
-    logger.info("Parsed JSON data: %s", data)
+    # Extract fields
+    updates = {"messages": state["messages"]}
+    lines = content.split("\n")
+    feedback = "No feedback"
+    message = "No message"
     
-    new_messages = state.get("messages", [])
-    for msg in data["updates"].get("messages", []):
-        new_messages.append(AIMessage(content=msg))
+    for line in lines:
+        if line.startswith("FEEDBACK:"):
+            feedback = line.split("FEEDBACK:")[1].strip()
+        elif line.startswith("MESSAGE:"):
+            message = line.split("MESSAGE:")[1].strip()
     
-    if data["updates"].get("testcase") is not None:
-        state["testcase"] = data["updates"]["testcase"]
-    if data["updates"].get("feedback") is not None:
-        state["feedback"] = data["updates"]["feedback"]
-    if data["updates"].get("code_context") is not None:
-        state["code_context"] = data["updates"]["code_context"]
-    state["messages"] = new_messages
+    updates["messages"].append(AIMessage(content=message))
+    updates["feedback"] = feedback
     
-    logger.info("Returning Command from critique_node - state: %s, goto: %s", state, data.get("goto"))
+    logger.info("Returning Command from critique_node - updates: %s, goto: testcase", updates)
     return Command(
-        update=state,
-        goto=data.get("goto")
+        update=updates,
+        goto="testcase"
     )
 
 # Assemble the StateGraph
 workflow = StateGraph(AgentState)
 workflow.add_node("testcase", testcase_node)
 workflow.add_node("critique", critique_node)
+
 workflow.set_entry_point("testcase")
 app = workflow.compile()
 
