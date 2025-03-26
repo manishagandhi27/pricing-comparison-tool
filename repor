@@ -3,43 +3,78 @@ import subprocess
 import coverage
 import pytest
 import datetime
+import sys
+import requests
+import shutil
+import git  # Requires 'pip install gitpython'
 
-def test_agent(test_file_path, feature_id="FEAT-123"):
+def fetch_file_from_gitlab(repo_url, file_path, branch="main", token=None, local_dir="temp_test_agents"):
     """
-    Test Agent: Executes tests from the given test file path and generates a report with coverage.
+    Fetch a file from GitLab using the API or clone the repo.
+    
+    Args:
+        repo_url (str): GitLab repo URL (e.g., 'https://gitlab.com/your-group/test-agents.git').
+        file_path (str): Path to the file in the repo (e.g., 'src/main/flask_Design.py').
+        branch (str): Branch name (default: 'main').
+        token (str): GitLab Personal Access Token (optional for private repos).
+        local_dir (str): Local directory to store fetched files (default: 'temp_test_agents').
+    
+    Returns:
+        str: Local path to the fetched file.
+    """
+    # Ensure local_dir exists
+    if os.path.exists(local_dir):
+        shutil.rmtree(local_dir)  # Clean up previous runs
+    os.makedirs(local_dir, exist_ok=True)
+
+    # Clone the repo (simpler than API for multiple files)
+    repo = git.Repo.clone_from(
+        repo_url if not token else f"https://oauth2:{token}@{repo_url.replace('https://', '')}",
+        local_dir,
+        branch=branch
+    )
+    
+    local_file_path = os.path.join(local_dir, file_path)
+    if not os.path.exists(local_file_path):
+        raise FileNotFoundError(f"File not found in repo: {file_path}")
+    
+    return local_file_path
+
+def test_agent(test_file_path, impl_file_path, feature_id="FEAT-123", gitlab_repo_url="https://gitlab.com/your-group/test-agents.git", gitlab_token=None):
+    """
+    Test Agent: Fetches test and implementation files from GitLab, executes tests, and generates a report with coverage.
 
     Args:
-        test_file_path (str): Path to the test file (e.g., 'tests/test_lld.py').
+        test_file_path (str): Path to the test file in GitLab (e.g., 'src/main/flask_Design.py').
+        impl_file_path (str): Path to the implementation file in GitLab (e.g., 'upload_doc/lld/lld.py').
         feature_id (str): Feature ID for naming the report (default: 'FEAT-123').
+        gitlab_repo_url (str): GitLab repository URL.
+        gitlab_token (str): GitLab Personal Access Token (optional for private repos).
 
     Returns:
         str: Path to the generated test report file.
-
-    Raises:
-        FileNotFoundError: If the test file doesn’t exist.
-        ValueError: If not run from the correct directory.
     """
-    # Constants
-    ROOT_DIR = "test-agents"
-    REPORT_DIR = os.path.join(ROOT_DIR, "reports")
-    IMPLEMENTATION_DIR = "upload_doc.lld"  # Package containing lld.py
+    # Temporary working directory
+    temp_dir = "temp_test_agents"
+    report_dir = os.path.join(temp_dir, "reports")
 
-    # Validate execution context
-    if not os.getcwd().endswith(ROOT_DIR):
-        raise ValueError(f"Please run this agent from the {ROOT_DIR}/ directory")
+    # Fetch files from GitLab
+    local_test_file = fetch_file_from_gitlab(gitlab_repo_url, test_file_path, token=gitlab_token, local_dir=temp_dir)
+    local_impl_file = fetch_file_from_gitlab(gitlab_repo_url, impl_file_path, token=gitlab_token, local_dir=temp_dir)
 
-    # Validate test file exists
-    if not os.path.exists(test_file_path):
-        raise FileNotFoundError(f"Test file not found: {test_file_path}")
+    # Add implementation directory to sys.path for imports
+    impl_dir = os.path.dirname(local_impl_file)
+    if impl_dir not in sys.path:
+        sys.path.append(impl_dir)
 
-    # Create reports directory if it doesn’t exist
-    os.makedirs(REPORT_DIR, exist_ok=True)
-    report_file = os.path.join(REPORT_DIR, f"test_report_{feature_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+    # Create reports directory
+    os.makedirs(report_dir, exist_ok=True)
+    report_file = os.path.join(report_dir, f"test_report_{feature_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
-    # Step 1: Run tests with pytest and capture output
+    # Step 1: Run tests with pytest
     try:
         test_result = subprocess.run(
-            ["pytest", test_file_path, "-v", "--tb=short"],  # Verbose output, short traceback
+            ["pytest", local_test_file, "-v", "--tb=short"],
             capture_output=True,
             text=True,
             check=False
@@ -56,25 +91,21 @@ def test_agent(test_file_path, feature_id="FEAT-123"):
 
     # Step 2: Measure code coverage
     try:
-        # Initialize coverage, targeting the upload_doc package
-        cov = coverage.Coverage(source=[IMPLEMENTATION_DIR])
+        cov = coverage.Coverage(source=[os.path.dirname(local_impl_file)])
         cov.start()
-
-        # Run tests again for coverage (silent output)
         subprocess.run(
-            ["pytest", test_file_path, "--no-cov"],
+            ["pytest", local_test_file, "--no-cov"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
         cov.stop()
         cov.save()
 
-        # Generate coverage report
         coverage_percent = cov.report(show_missing_lines=True)
-        cov_report_file = os.path.join(REPORT_DIR, f"coverage_{feature_id}.txt")
+        cov_report_file = os.path.join(report_dir, f"coverage_{feature_id}.txt")
         with open(cov_report_file, "w") as f:
-            cov.report(file=f)  # Detailed report to a file
-        cov.html_report(directory=os.path.join(REPORT_DIR, "coverage_html"))  # Optional HTML report
+            cov.report(file=f)
+        cov.html_report(directory=os.path.join(report_dir, "coverage_html"))
     except Exception as e:
         coverage_percent = 0.0
         cov_report_file = None
@@ -86,9 +117,10 @@ def test_agent(test_file_path, feature_id="FEAT-123"):
     with open(report_file, "w") as f:
         f.write(f"Test Report for {feature_id}\n")
         f.write("=" * 50 + "\n")
-        f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Test File: {test_file_path} (local: {local_test_file})\n")
+        f.write(f"Implementation File: {impl_file_path} (local: {local_impl_file})\n\n")
 
-        # Test Results Section
         f.write("Test Results\n")
         f.write("-" * 20 + "\n")
         f.write(f"Overall Status: {'PASSED' if passed else 'FAILED'}\n")
@@ -99,30 +131,36 @@ def test_agent(test_file_path, feature_id="FEAT-123"):
         f.write(test_output)
         f.write("\n")
 
-        # Coverage Section
         f.write("Coverage Report\n")
         f.write("-" * 20 + "\n")
         if cov_error:
             f.write(f"Error: {cov_error}\n")
         else:
             f.write(f"Coverage: {coverage_percent:.2f}%\n")
-            f.write(f"Covered Files: {IMPLEMENTATION_DIR}/lld.py\n")
+            f.write(f"Covered File: {local_impl_file}\n")
             f.write(f"Detailed Report: {cov_report_file}\n")
-            f.write(f"HTML Report: {REPORT_DIR}/coverage_html/index.html\n")
+            f.write(f"HTML Report: {report_dir}/coverage_html/index.html\n")
 
-    # Step 4: Simulate GitLab commit
+    # Step 4: Simulate GitLab commit (could be expanded to actual commit)
     commit_message = f"Add test report for {feature_id} with coverage - {passed_count} passed, {failed_count} failed"
     print(f"Generated report: {report_file}")
     print(f"Commit message: {commit_message}")
+
+    # Optional: Clean up temp directory (comment out if you want to inspect files)
+    # shutil.rmtree(temp_dir)
 
     return report_file
 
 def main():
     """Example usage of the Test Agent."""
-    test_file_path = "tests/test_lld.py"
+    gitlab_repo_url = "https://gitlab.com/your-group/test-agents.git"  # Replace with your repo URL
+    gitlab_token = "your-personal-access-token"  # Replace with your token
+    test_file_path = "src/main/flask_Design.py"
+    impl_file_path = "upload_doc/lld/lld.py"
     feature_id = "FEAT-123"
+    
     try:
-        report_path = test_agent(test_file_path, feature_id)
+        report_path = test_agent(test_file_path, impl_file_path, feature_id, gitlab_repo_url, gitlab_token)
         print(f"Test report generated successfully at: {report_path}")
     except Exception as e:
         print(f"Test Agent failed: {str(e)}")
