@@ -1,0 +1,46 @@
+from langchain_core.tools import tool
+import os
+from pathlib import Path
+
+@tool
+def get_project_structure(repo_dir: str, current_file: str = None) -> str:
+    """
+    Returns a summary of the repository's directory structure as a string.
+    Includes the directory hierarchy, the current file being tested, configuration files, and test files.
+    
+    Args:
+        repo_dir (str): The directory where the repository is cloned.
+        current_file (str): The path of the file being tested (relative to repo_dir).
+    """
+    structure = []
+    config_files = ("requirements.txt", "pyproject.toml", "pom.xml", "package.json")
+    
+    for root, dirs, files in os.walk(repo_dir):
+        # Skip irrelevant directories
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__", "node_modules", "venv", "build")]
+        
+        # Calculate the relative path and indentation level
+        relative_path = os.path.relpath(root, repo_dir)
+        level = relative_path.count(os.sep) if relative_path != "." else 0
+        indent = "  " * level
+        
+        # Add the directory to the structure
+        dir_name = os.path.basename(root) if relative_path != "." else "repo_root"
+        structure.append(f"{indent}{dir_name}/")
+        
+        # Add relevant files: current file, config files, and test files
+        for f in files:
+            if f.startswith(".") or f.endswith((".md", ".txt", ".png", ".jpg", ".jpeg", ".gif")):
+                continue  # Skip hidden files, docs, and binary files
+            relative_file_path = os.path.join(relative_path, f) if relative_path != "." else f
+            # Include the current file being tested
+            if current_file and relative_file_path == current_file:
+                structure.append(f"{indent}  {f}")
+            # Include configuration files
+            elif f in config_files:
+                structure.append(f"{indent}  {f}")
+            # Include test files (e.g., in a 'tests/' directory or files starting with 'test_')
+            elif "tests" in relative_path.lower() or f.lower().startswith("test_"):
+                structure.append(f"{indent}  {f}")
+    
+    return "\n".join(structure)
